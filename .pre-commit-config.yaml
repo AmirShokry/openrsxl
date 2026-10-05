@@ -1,0 +1,66 @@
+# Lint configuration: `pre-commit run --all-files` (also the CI "lint" job).
+#
+# tests/upstream/ is openpyxl's test-suite (its data files must stay byte for
+# byte) and python/openrsxl/ outside _native.py, worksheet/_cellstore.py and
+# extended/ is openpyxl's code: both keep openpyxl's formatting so that new
+# openpyxl releases can be merged (docs/DEVELOPMENT.md). The formatters only
+# run on the code written for openrsxl; ruff checks everything (see
+# pyproject.toml).
+exclude: ^(tests/upstream/|\.github/pyodide/)
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+        args: [--unsafe]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.21.2
+    hooks:
+      - id: pyupgrade
+        args: [--py310-plus, --keep-runtime-typing]
+        files: &own_python ^(tools/|examples/|tests/|python/openrsxl/(_native\.py|worksheet/_cellstore\.py|extended/))
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+  - repo: https://github.com/PyCQA/isort
+    rev: 9.0.2
+    hooks:
+      - id: isort
+        name: isort (python)
+        files: *own_python
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 26.10.0
+    hooks:
+      - id: black
+        files: *own_python
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: mypy
+        language: python
+        additional_dependencies: ["mypy==2.4.0"]
+        types: [python]
+        pass_filenames: false
+  - repo: local
+    hooks:
+      - id: rust-linting
+        name: Rust linting
+        entry: cargo fmt --all -- --config group_imports=StdExternalCrate,imports_granularity=Module
+        pass_filenames: true
+        types: [rust]
+        language: system
+      - id: rust-clippy
+        name: Rust clippy
+        entry: cargo clippy -- -D warnings -A incomplete_features -W clippy::dbg_macro -W clippy::print_stdout
+        pass_filenames: false
+        types: [rust]
+        language: system
