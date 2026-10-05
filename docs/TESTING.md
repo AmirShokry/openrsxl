@@ -10,7 +10,7 @@ oracle throughout: every check compares openrsxl with openpyxl itself.
 | openrsxl's own suite (`pytest`) | 2 638 | all pass (lxml and ElementTree back-ends) |
 | openpyxl's suite, ported (`tests/upstream`) | 2 605 | 2 588 pass, the rest skipped / expected failures - the same as openpyxl's own run with the same packages (lxml back-end); also with ElementTree |
 | Python fallbacks (`OPENRSXL_PURE_PYTHON=1`) | `test_extended`, smoke | all pass |
-| hypothesis properties (API sequences, CellStore, XML / numbers / formulae) | 300 examples each in every run | all pass |
+| hypothesis properties (API sequences, CellStore, XML / numbers / formulae) | 300 examples each in every run, 3 000 each before the release | all pass |
 
 Interpreters: CPython 3.14 (all suites), 3.10 (locally built wheel), 3.14t
 free-threaded (2 135 differential tests against the installed wheel); in CI
@@ -37,14 +37,15 @@ openpyxl's full mode.
 | [python-calamine](https://github.com/dimastbk/python-calamine), openpyxl | 46 | |
 | **total** | **1 960** | |
 
-Results (lxml back-end): **1 955 files identical in all 10 modes**; two of
-them declare a dimension of 17 billion cells, so their read-only / streaming
-checks were not run (read-only mode would yield 17 billion cells, in both
-libraries). The five remaining files are the largest of the corpus (up to
-150 000 rows, thousands of merged ranges, a 1 MB string shared by 12 000
-cells): the oracle - openpyxl's full mode, loaded several times per check -
-needs more memory or time for them than the run allowed, so they are
-compared one at a time with larger limits.
+Results (lxml back-end): **all 1 960 files identical in all 10 modes**. Two
+of them declare a dimension of 17 billion cells, so their read-only /
+streaming checks were not run (read-only mode would yield 17 billion cells,
+in both libraries). The five largest files - 2.1 million cells in 150 000
+rows, thousands of merged ranges, a merged range covering a whole column
+(for which openpyxl's full mode creates a million `MergedCell` objects), a
+1 MB string shared by 12 000 cells - were compared one file at a time with
+larger limits: the oracle (openpyxl's full mode, loaded several times per
+check) needs up to 92 minutes per file for them.
 
 ElementTree back-end (`OPENPYXL_LXML=False`), every 4th file (487 files,
 full mode, `data_only`, read-only, extended): 486 identical; the oracle
