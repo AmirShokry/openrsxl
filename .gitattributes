@@ -1,0 +1,15 @@
+# LF line endings in the repository and in checkouts
+* text=auto eol=lf
+
+# openpyxl's test-suite data: kept byte for byte (some files use CRLF)
+tests/upstream/** -text
+
+*.xlsx binary
+*.xlsm binary
+*.xltx binary
+*.xltm binary
+*.xls binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.emf binary

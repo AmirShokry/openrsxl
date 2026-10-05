@@ -1,0 +1,27 @@
+# build output
+/target
+/dist
+/build
+*.egg-info
+*.pyd
+*.so
+*.pdb
+*.new
+
+# Python
+__pycache__/
+*.pyc
+.hypothesis/
+.pytest_cache/
+/.venv
+/.venv-pyodide
+
+# local references: openpyxl's sources (licence and authors are in NOTICE)
+/vendor_ref/
+
+# generated benchmark files (tools/make_bench_files.py)
+/benchfiles/
+
+# tool caches
+.mypy_cache/
+.ruff_cache/

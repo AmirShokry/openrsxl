@@ -1,0 +1,46 @@
+[package]
+name = "openrsxl"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust engine for openrsxl, an openpyxl-compatible Excel library"
+authors = ["asheer_mokry"]
+repository = "https://github.com/AmirShokry/openrsxl"
+homepage = "https://github.com/AmirShokry/openrsxl"
+readme = "README.md"
+publish = false
+# source distribution (maturin adds the Python package and the files listed in
+# pyproject.toml)
+include = [
+    "/src/**/*.rs",
+    "/tools/tokbench.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+]
+
+[lib]
+name = "_openrsxl"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# "extension-module" is enabled by maturin (pyproject.toml), so that `cargo test`
+# links against libpython on every platform
+pyo3 = "0.29"
+memchr = "2"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+
+[features]
+# timing output for development (never enabled in release builds)
+prof = []
+
+# tokenizer throughput: cargo run --release --example tokbench <file.xml>
+[[example]]
+name = "tokbench"
+path = "tools/tokbench.rs"

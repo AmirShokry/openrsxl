@@ -1,0 +1,118 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "openrsxl"
+description = "Drop-in replacement for openpyxl powered by Rust: same API and results, much faster and lighter, plus streaming of formulas, cached values, comments, hyperlinks and merged cells"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "asheer_mokry" }]
+keywords = ["excel", "xlsx", "xlsm", "openpyxl", "spreadsheet", "streaming", "rust"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Office/Business :: Financial :: Spreadsheet",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = ["et_xmlfile"]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/AmirShokry/openrsxl"
+Source = "https://github.com/AmirShokry/openrsxl"
+Issues = "https://github.com/AmirShokry/openrsxl/issues"
+Documentation = "https://github.com/AmirShokry/openrsxl#readme"
+Changelog = "https://github.com/AmirShokry/openrsxl/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+# openpyxl is the test oracle: a test dependency only
+test = ["pytest", "openpyxl==3.1.5", "lxml", "hypothesis", "pillow", "numpy", "pandas", "psutil"]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.9,<2.0",
+    "pre-commit",
+    "pytest",
+    "openpyxl==3.1.5",
+    "lxml",
+    "hypothesis",
+    "pillow",
+    "numpy",
+    "pandas",
+    "psutil",
+]
+pyodide-build = ["pyodide-build"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "openrsxl._openrsxl"
+features = ["pyo3/extension-module"]
+# the source distribution also carries the documentation, the examples and
+# the test-suite (Rust sources and metadata: see `include` in Cargo.toml)
+include = [
+    { path = "docs/*.md", format = "sdist" },
+    { path = "examples/*.py", format = "sdist" },
+    { path = "tests/**/*", format = "sdist" },
+    { path = "pytest.ini", format = "sdist" },
+    { path = "CHANGELOG.md", format = "sdist" },
+]
+exclude = [
+    "python/**/*.pdb",
+    "python/**/__pycache__/**",
+    "**/*.pyc",
+    "tests/**/__pycache__/**",
+    "tests/.hypothesis/**",
+]
+
+# --- lint configuration (pre-commit, CI "lint" job) -------------------------
+# python/openrsxl/ outside _native.py, worksheet/_cellstore.py and extended/
+# is openpyxl's code and tests/upstream/ openpyxl's test-suite (both ported,
+# imports renamed): they keep openpyxl's formatting and quirks (bug-for-bug
+# compatibility, see docs/DEVELOPMENT.md) and are only checked for errors
+# that would make them unusable.
+
+[tool.black]
+line-length = 120
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 120
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["tests/upstream", "vendor_ref"]
+
+[tool.ruff.lint]
+select = ["E9", "F", "B006", "B012", "B015", "B018"]
+
+[tool.ruff.lint.per-file-ignores]
+"python/openrsxl/{__init__,_constants}.py" = ["F", "B"]
+"python/openrsxl/{cell,chart,chartsheet,comments,compat,descriptors,drawing,formatting,formula,packaging,pivot,reader,styles,utils,workbook,worksheet,writer,xml}/**" = ["F", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+files = [
+    "python/openrsxl/_native.py",
+    "python/openrsxl/worksheet/_cellstore.py",
+    "python/openrsxl/extended",
+]
+# the ported openpyxl code has no annotations: checked through these modules
+# only, without reporting errors in it
+follow_imports = "silent"
+ignore_missing_imports = true
