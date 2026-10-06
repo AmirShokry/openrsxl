@@ -126,6 +126,18 @@ Memory does not grow with the number of cells: the peak of a 9.9 M cell
 workbook is its shared strings table, as in plain read-only mode, and every
 feature together adds ~2 MB to it.
 
+`create_empty_cells` (0.2.0) costs the cells it creates, one per empty
+position of the iterated rows; nothing is kept. Best of two runs;
+`sparse.xlsx`: 50 000 rows x 30 columns written by openrsxl's write-only
+mode, each cell filled with probability 0.1 (1.35 M empty positions):
+
+| file | mode | load | iterate cells | peak RSS (+increase) |
+|---|---|---|---|---|
+| sample.xlsx (616k cells) | openrsxl.extended, no flag | 0.03 s | 0.58 s | 49 MB (+29) |
+|  | openrsxl.extended, `create_empty_cells` | 0.03 s | 0.58 s | 49 MB (+30) |
+| sparse.xlsx (150k cells, 1.35 M empty) | openrsxl.extended, no flag | 0.06 s | 0.17 s | 44 MB (+25) |
+|  | openrsxl.extended, `create_empty_cells` | 0.06 s | 0.49 s | 44 MB (+25) |
+
 ## Creating workbooks
 
 `tools/bench_write.py`: 200 000 rows x 10 columns (ints, floats, strings,

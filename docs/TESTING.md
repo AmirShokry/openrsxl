@@ -1,9 +1,40 @@
-# Verification report - openrsxl 0.1.0
+# Verification report
 
-How openrsxl 0.1.0 was verified before its release. openpyxl 3.1.5 is the
-oracle throughout: every check compares openrsxl with openpyxl itself.
+How each openrsxl release was verified before it was published. openpyxl
+3.1.5 is the oracle throughout: every check compares openrsxl with openpyxl
+itself.
 
-## Test suites
+## openrsxl 0.2.0
+
+New: `create_empty_cells`, `install_as_openpyxl()` and a fix of the import
+aliases of `openrsxl.extended` (CHANGELOG.md).
+
+* Test suites: openrsxl's own suite, 2 644 tests, all pass (lxml); its
+  reader, writer, extended and security tests also with ElementTree
+  (2 229); openpyxl's ported suite: 2 588 pass, as for 0.1.0.
+* `create_empty_cells` is compared with the cell openpyxl's full mode
+  creates when the position is accessed - coordinate, value, data type,
+  every style attribute, the enabled cell features - in every test of the
+  extended oracle: all flags, each flag alone, each pair of the cell-level
+  flags, 21 raw-XML edge cases, 60 random workbooks, random sub-rectangles.
+  Deliberately broken variants (another default style, cells one row off,
+  an `EmptyCell` left in place) are all detected by the oracle.
+* Real-world files: all 1 972 files that the 0.1.0 runs matched (the
+  corpus below, the XlsxWriter files with unusual options and six more test
+  files of python-calamine), re-checked in extended mode with every flag
+  (also with `data_only=True`) and with a random subset of the flags per
+  file: 1 969 identical - among them the three heaviest, compared one at a
+  time with larger limits; the other three declare a dimension of 17
+  billion cells, so their streaming checks were skipped, as for 0.1.0.
+* `install_as_openpyxl()` runs in fresh interpreters with every warning
+  turned into an error: class identity, `isinstance` of formula values in
+  full, read-only and streaming modes, saving through the alias (relative
+  imports of aliased modules), refusal after the real openpyxl was
+  imported, pandas' `read_excel(engine="openpyxl")` and `to_excel`.
+
+## openrsxl 0.1.0
+
+### Test suites
 
 | suite | tests | result |
 |---|---|---|
@@ -18,7 +49,7 @@ CPython 3.10 - 3.14 and 3.14t on Linux, and the built wheels on Linux,
 macOS and Windows (x86-64 and ARM64). On PyPy the Rust engine is disabled
 (it crashed PyPy's cpyext layer); openpyxl's Python code runs there.
 
-## Real-world corpus
+### Real-world corpus
 
 `tools/corpus.py` compares every file in 10 modes - full mode, `data_only`,
 read-only (both), `rich_text`, `keep_vba`, `keep_links=False`, the saved
@@ -58,7 +89,7 @@ row 1 048 576, chartsheets, protection, outline levels): 6 of 6 identical
 in all 10 modes (the file with cells at XFD1048576 without the streaming
 checks).
 
-## Security review
+### Security review
 
 * Hostile input (`tests/test_security.py`, 72 tests, every load mode and the
   extended features): XXE in every package part (no file content leaks),
@@ -79,7 +110,7 @@ checks).
   recursion on input structure; 32-bit (i686 / armv7) and big-endian
   (s390x) builds reviewed and compiled.
 
-## Defects found and fixed by this verification
+### Defects found and fixed by this verification
 
 * Extended streaming: a malformed character reference (`&#x;`, `&#0;`, ...)
   in a `<row>` / `<c>` attribute made the pre-scan panic (`PanicException`)

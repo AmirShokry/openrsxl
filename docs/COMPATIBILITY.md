@@ -15,7 +15,25 @@ types or files produced.
    `<openrsxl.styles.fonts.Font object> ...`. Objects of the two libraries are
    distinct types: an `openpyxl.styles.Font` cannot be assigned to an openrsxl
    cell (the typed descriptors reject it, just as they would reject any other
-   foreign type).
+   foreign type), and `type()` / `isinstance` checks against openpyxl's
+   classes are false. This includes the values of array and data-table
+   formula cells: `openrsxl.worksheet.formula.ArrayFormula` /
+   `DataTableFormula`, not openpyxl's. Sharing openpyxl's classes would make
+   openrsxl depend on openpyxl (and behave differently depending on whether
+   it is installed) while every other class - cells, styles, comments, ... -
+   would still differ. Two ways out:
+   `openrsxl.extended.install_as_openpyxl()`, called at start-up before
+   anything imports openpyxl, makes every `openpyxl` module of the process
+   the corresponding `openrsxl` module (so openpyxl's class names *are*
+   openrsxl's classes, also for libraries such as pandas that import
+   openpyxl themselves; RuntimeError if the real openpyxl was imported
+   first); otherwise, code that handles both libraries' objects should test
+   the attributes both define: `t` (`"array"` / `"dataTable"`), `ref`,
+   `text` (array formulas), `ca`, `dt2D`, `dtr`, `r1`, `r2`, `del1`, `del2`
+   (data tables). As in openpyxl, these two classes define neither `__eq__`
+   (two loads give unequal objects) nor `__repr__` (the default repr shows
+   the object's address): serialise them by their attributes, eg.
+   `value.text`.
 2. **Warning locations.** Warnings carry the same category and message, but
    their `filename`/`lineno` point into openrsxl's modules. Warnings raised
    while reading worksheets (unsupported extensions, out-of-range dates, ...)
@@ -129,9 +147,10 @@ choices:
   missing in openpyxl's read-only mode (the added attributes are plain slots,
   read at C speed). With no flag set, `openrsxl.extended.load_workbook`
   returns the plain openpyxl read-only objects.
-* **Full mode.** The `read_*` flags have no effect without `read_only=True`
-  (full mode reads everything anyway). `formula_and_value=True` requires
-  `read_only=True` (`ValueError` otherwise).
+* **Full mode.** The `read_*` flags and `create_empty_cells` have no effect
+  without `read_only=True` (full mode reads everything and creates cells on
+  access anyway). `formula_and_value=True` requires `read_only=True`
+  (`ValueError` otherwise).
 * **values_only.** `iter_rows(values_only=True)` yields `value` (following
   `data_only`); the other features are only visible on cell objects, except
   that merged cells are `None` and hyperlink targets fill empty cells, as in
@@ -140,6 +159,17 @@ choices:
   the sheet's `<dimension>` element; file cells outside it are not produced.
   Cells *created* by a feature (merged cells, linked or commented empty cells,
   as full mode creates them) extend `max_row` / `max_column` when needed.
+* **Empty positions.** Read-only mode yields one shared `EmptyCell` - no
+  `coordinate`, `row` or `column` - wherever the file has no cell, while
+  full mode creates a `Cell` (default style) when such a position is
+  accessed. `create_empty_cells=True` gives full mode's cell instead: a
+  read-only cell with `coordinate` / `row` / `column`, value None, data type
+  `"n"`, full mode's default style (`has_style` False) and None for the
+  enabled cell features. They are created while iterating and not kept (a
+  new object on every access); rows keep read-only mode's shape (no rows
+  after the last row of the file, as in openpyxl's read-only mode, except
+  `ws.cell()` / `ws["A1"]`, which give the cell of any position). Cost: about
+  0.2 µs per empty position, no memory.
 * **MergedCellRange.start_cell** is the top-left cell as full mode has it
   (value, borders of the range, hyperlink, comment, formula / cached value),
   including full mode's quirk for overlapping ranges (the range keeps the

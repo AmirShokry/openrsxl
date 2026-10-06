@@ -1,6 +1,6 @@
 [package]
 name = "openrsxl"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Rust engine for openrsxl, an openpyxl-compatible Excel library"

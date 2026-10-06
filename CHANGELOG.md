@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.0
+
+* `openrsxl.extended.load_workbook(..., read_only=True,
+  create_empty_cells=True)`: every empty position of a row is a cell like
+  the one openpyxl's full mode creates when the position is accessed -
+  `coordinate`, `row`, `column`, value None, default style - instead of
+  read-only mode's shared, coordinate-less `EmptyCell`. Created on the fly
+  (no memory), about 0.2 µs per empty position. Without the flag nothing
+  changes.
+* `openrsxl.extended.install_as_openpyxl()`: called once at start-up, it
+  makes `import openpyxl` (every `openpyxl.*` module, also inside other
+  libraries such as pandas) import openrsxl, so `isinstance` checks written
+  for openpyxl's classes - eg. `ArrayFormula` / `DataTableFormula` formula
+  values - hold for openrsxl's objects. Without it the classes of the two
+  libraries stay distinct (documented, with the attributes both share).
+* Fixed: importing a module through its `openrsxl.extended.<module>` alias
+  replaced the `__spec__` of the `openrsxl.<module>` module; its
+  function-level relative imports (eg. when saving a workbook) then emitted
+  `DeprecationWarning: __package__ != __spec__.parent`.
+
 ## 0.1.0
 
 First release.

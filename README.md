@@ -18,7 +18,8 @@
 * **`openrsxl.extended`** - openpyxl's API plus things openpyxl cannot do:
   streaming (read-only mode) access to formulas *and* their cached values,
   comments, hyperlinks, merged cells, dimensions, sheet properties, data
-  validation, conditional formatting and tables - each behind its own flag.
+  validation, conditional formatting, tables and full mode's cells at empty
+  positions - each behind its own flag.
 
 ## Installation
 
@@ -70,8 +71,21 @@ wb.save("log.xlsx")
 ```
 
 Existing code using openpyxl can also keep its imports and alias the module
-once (`import openrsxl as openpyxl`). Supported formats are openpyxl's:
-`.xlsx`, `.xlsm`, `.xltx`, `.xltm`.
+once (`import openrsxl as openpyxl`), or switch a whole application -
+including libraries that import openpyxl themselves, such as pandas'
+`read_excel(engine="openpyxl")` - with one call at start-up, before
+anything imports openpyxl:
+
+```python
+import openrsxl.extended
+openrsxl.extended.install_as_openpyxl()   # `import openpyxl` now imports openrsxl
+
+from openpyxl.worksheet.formula import ArrayFormula   # openrsxl's class
+```
+
+Then `isinstance` checks written for openpyxl's classes hold for openrsxl's
+objects (without it, the classes of the two libraries are distinct, see
+below). Supported formats are openpyxl's: `.xlsx`, `.xlsm`, `.xltx`, `.xltm`.
 
 See [`examples/quickstart.py`](https://github.com/AmirShokry/openrsxl/blob/main/examples/quickstart.py) for a complete,
 runnable example.
@@ -128,6 +142,7 @@ without `read_only=True`, the other flags are ignored).
 | `read_data_validations` | `ws.data_validations`. |
 | `read_conditional_formatting` | `ws.conditional_formatting`. |
 | `read_tables` | `ws.tables`. |
+| `create_empty_cells` | a cell at every empty position, like the one full mode creates when the position is accessed: `coordinate`, `row`, `column`, value `None`, default style (and `None` for the enabled cell features), instead of read-only mode's shared, coordinate-less `EmptyCell`. Created on the fly (nothing is kept); rows keep read-only mode's shape. |
 
 Every value is what openpyxl's full mode returns for the same file - same
 attribute names, same types, same values. The only new names are
@@ -160,10 +175,22 @@ from openrsxl.extended import load_workbook
 wb = load_workbook("book.xlsx", read_only=True, read_comments=True, read_hyperlinks=True)
 for row in wb.active.iter_rows():
     for cell in row:
-        if getattr(cell, "comment", None):       # EmptyCell / MergedCell have no comment
+        if cell.comment:                         # None if absent (empty and merged cells too)
             print(cell.coordinate, cell.comment.author, cell.comment.text)
-        if getattr(cell, "hyperlink", None):
+        if cell.hyperlink:
             print(cell.coordinate, cell.hyperlink.target or cell.hyperlink.location)
+```
+
+**Every position as a cell, as in full mode** - read-only mode yields one
+shared `EmptyCell` without coordinate for every empty position:
+
+```python
+from openrsxl.extended import load_workbook
+
+wb = load_workbook("book.xlsx", read_only=True, create_empty_cells=True)
+for row in wb.active.iter_rows():
+    for cell in row:
+        print(cell.coordinate, cell.value)       # empty positions too: None, default style
 ```
 
 **Merged cells:**
@@ -227,9 +254,10 @@ library) in parentheses.
 | read-only: iterate all values / cells | 3.7x - 9.6x | less (43-49 MB vs 51-61 MB) |
 | write-only: write 200 000 rows | 2.6x (fill), same save | the same (43 MB) |
 
-The streaming features keep read-only mode's flat memory: all nine flags add
-~2 MB to the 119 MB of `large_sample.xlsx` (whose peak is its shared strings
-table) and 10x the cells give the same peak.
+The streaming features keep read-only mode's flat memory: all nine `read_*` /
+`formula_and_value` flags add ~2 MB to the 119 MB of `large_sample.xlsx`
+(whose peak is its shared strings table) and 10x the cells give the same
+peak. `create_empty_cells` adds no memory and ~0.2 µs per empty position.
 
 ## Compatibility and limitations
 
@@ -239,7 +267,12 @@ What differs, in full in [`docs/COMPATIBILITY.md`](https://github.com/AmirShokry
 
 * **Module names.** Classes live in `openrsxl.*` (`Font.__module__ ==
   "openrsxl.styles.fonts"`), so openpyxl and openrsxl objects cannot be
-  mixed. Warnings carry the same category and message but other
+  mixed, and `isinstance` checks against openpyxl's classes are false - eg.
+  for the `ArrayFormula` / `DataTableFormula` values of formula cells -
+  unless `openrsxl.extended.install_as_openpyxl()` makes openpyxl's names
+  point to openrsxl (above). Code that must accept both libraries' objects
+  can test the attributes they share (`value.t == "array"`, `value.ref`,
+  `value.text`). Warnings carry the same category and message but other
   `filename`/`lineno`; tracebacks differ.
 * **`openrsxl.__version__` is `"3.1.5"`**, the openpyxl version whose API is
   implemented (code checking the openpyxl version keeps working); the
@@ -272,6 +305,9 @@ What differs, in full in [`docs/COMPATIBILITY.md`](https://github.com/AmirShokry
   the `<row>` elements, and a sheet that claims a huge dimension yields that
   many (empty) cells, as in openpyxl (use `iter_rows(max_row=..., max_col=...)`
   or `ws.reset_dimensions()`).
+* Empty positions are read-only mode's coordinate-less `EmptyCell` unless
+  `create_empty_cells=True`, which creates full mode's cell for each of
+  them (about 0.2 µs per empty position, no memory).
 * Cell data that makes full mode fail in `load_workbook` (eg. an invalid
   style index) behaves as in read-only mode: the error is raised when the
   faulty data is used - when the style is read, or while iterating if a
