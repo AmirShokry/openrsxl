@@ -22,9 +22,15 @@ Additions:
     keyword-only flag (``formula_and_value``, ``read_comments``,
     ``read_hyperlinks``, ``read_merged_cells``, ``read_dimensions``,
     ``read_sheet_properties``, ``read_data_validations``,
-    ``read_conditional_formatting``, ``read_tables``). Without a flag it is
+    ``read_conditional_formatting``, ``read_tables``), and full mode's cells
+    at empty positions (``create_empty_cells``). Without a flag it is
     exactly openpyxl's ``load_workbook``. See ``help(load_workbook)``, the
     README and docs/COMPATIBILITY.md (limitations).
+
+``install_as_openpyxl()``
+    make ``import openpyxl`` (in this process, also inside other libraries)
+    import openrsxl, so that code written for openpyxl - including its
+    ``isinstance`` checks - uses openrsxl unchanged.
 
 New extended features are added to this package without affecting the
 openpyxl-compatible ``openrsxl`` namespace; real modules of
@@ -64,13 +70,18 @@ class _AliasLoader(importlib.abc.Loader):
 
     def __init__(self, target):
         self.target = target
+        self._spec = None
 
     def create_module(self, spec):
-        return importlib.import_module(self.target)
+        module = importlib.import_module(self.target)
+        self._spec = module.__spec__
+        return module
 
     def exec_module(self, module):
-        # the aliased module is already initialised
-        pass
+        # the aliased module is already initialised; the import system has
+        # just set its __spec__ to the alias' spec: restore its own (relative
+        # imports and importlib.reload rely on it)
+        module.__spec__ = self._spec
 
 
 class _AliasFinder(importlib.abc.MetaPathFinder):
@@ -98,6 +109,47 @@ class _AliasFinder(importlib.abc.MetaPathFinder):
 
 if not any(isinstance(f, _AliasFinder) for f in sys.meta_path):
     sys.meta_path.insert(0, _AliasFinder())
+
+
+class _OpenpyxlFinder(importlib.abc.MetaPathFinder):
+    """Resolve ``openpyxl`` / ``openpyxl.<x>`` to ``openrsxl`` / ``openrsxl.<x>``."""
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != "openpyxl" and not fullname.startswith("openpyxl."):
+            return None
+        target_name = "openrsxl" + fullname[len("openpyxl") :]
+        try:
+            target_spec = importlib.util.find_spec(target_name)
+        except (ImportError, ValueError):
+            return None
+        if target_spec is None:
+            return None
+        return importlib.util.spec_from_loader(
+            fullname, _AliasLoader(target_name), is_package=target_spec.submodule_search_locations is not None
+        )
+
+
+def install_as_openpyxl():
+    """
+    Make ``import openpyxl`` import openrsxl, in this process.
+
+    Every ``openpyxl`` module - ``import openpyxl``, ``from openpyxl.styles
+    import Font``, also inside other libraries such as pandas - is then the
+    corresponding ``openrsxl`` module: ``openpyxl.worksheet.formula.ArrayFormula
+    is openrsxl.worksheet.formula.ArrayFormula``, so ``isinstance`` checks
+    written for openpyxl hold for openrsxl's objects. Call it once at start-up,
+    before anything imports openpyxl (RuntimeError otherwise: objects of the
+    real openpyxl would exist next to openrsxl's); calling it again is a
+    no-op. Like PyMySQL's ``install_as_MySQLdb()``.
+    """
+    for name, module in list(sys.modules.items()):
+        if name == "openpyxl" or name.startswith("openpyxl."):
+            if module is not sys.modules.get("openrsxl" + name[len("openpyxl") :]):
+                raise RuntimeError(
+                    "openpyxl is already imported: call install_as_openpyxl() before anything imports openpyxl"
+                )
+    if not any(isinstance(f, _OpenpyxlFinder) for f in sys.meta_path):
+        sys.meta_path.insert(0, _OpenpyxlFinder())
 
 
 def __getattr__(name):
