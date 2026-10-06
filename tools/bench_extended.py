@@ -31,6 +31,7 @@ ALL = [
     "read_data_validations",
     "read_conditional_formatting",
     "read_tables",
+    "create_empty_cells",
 ]
 
 

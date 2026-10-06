@@ -73,6 +73,7 @@ ALL_FLAGS = dict(
     read_data_validations=True,
     read_conditional_formatting=True,
     read_tables=True,
+    create_empty_cells=True,
 )
 
 PROPERTY_ATTRS = [
@@ -174,6 +175,7 @@ def compare_extended(src, data_only=False, flags=None, rsxl=None, oracle=None, l
 
     # features that are off do not change the cells: no merge / hyperlink
     # binding in the oracle either
+    from openpyxl.cell.cell import Cell
     from openpyxl.worksheet._reader import WorksheetReader
 
     patched = {}
@@ -241,11 +243,21 @@ def compare_extended(src, data_only=False, flags=None, rsxl=None, oracle=None, l
                         continue
                     seen.add((r_i, c_i))
                     if exp is None:
-                        if type(c).__name__ != "EmptyCell":
-                            if diff(f"{name}!{(r_i, c_i)}: unexpected {type(c).__name__} {c!r}"):
+                        if not flags.get("create_empty_cells"):
+                            if type(c).__name__ != "EmptyCell":
+                                if diff(f"{name}!{(r_i, c_i)}: unexpected {type(c).__name__} {c!r}"):
+                                    return diffs
+                            continue
+                        # the cell full mode creates when the position is
+                        # accessed (not kept: the oracle workbook is unchanged)
+                        exp = fexp = vexp = Cell(pws, row=r_i, column=c_i)
+                        pos = (getattr(c, "row", None), getattr(c, "column", None), getattr(c, "coordinate", None))
+                        if pos != (r_i, c_i, exp.coordinate):
+                            if diff(f"{name}!{exp.coordinate}: empty cell at {pos}"):
                                 return diffs
-                        continue
-                    e = expected_cell(exp, fcells.get((r_i, c_i)), vcells.get((r_i, c_i)), flags)
+                    else:
+                        fexp, vexp = fcells.get((r_i, c_i)), vcells.get((r_i, c_i))
+                    e = expected_cell(exp, fexp, vexp, flags)
                     try:
                         a = actual_cell(c, flags)
                     except Exception as err:

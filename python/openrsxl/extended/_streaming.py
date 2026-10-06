@@ -21,6 +21,9 @@ flag                           adds
 ``read_data_validations``      ``ws.data_validations``
 ``read_conditional_formatting`` ``ws.conditional_formatting``
 ``read_tables``                ``ws.tables``
+``create_empty_cells``         a cell at every empty position, as full mode
+                               creates on access (``coordinate``, default
+                               style), instead of the shared ``EmptyCell``
 =============================  ==============================================
 
 Memory stays independent of the number of cells: rows are streamed exactly
@@ -75,6 +78,7 @@ FLAGS = (
     "read_data_validations",
     "read_conditional_formatting",
     "read_tables",
+    "create_empty_cells",
 )
 
 COMMENT_WARNING = """Cell '{0}':{1} is part of a merged range but has a comment which will be removed because merged cells cannot contain any data."""
@@ -163,7 +167,13 @@ class _Options:
 
     @property
     def cell_level(self):
-        return self.formula_and_value or self.read_comments or self.read_hyperlinks or self.read_merged_cells
+        return (
+            self.formula_and_value
+            or self.read_comments
+            or self.read_hyperlinks
+            or self.read_merged_cells
+            or self.create_empty_cells
+        )
 
     @property
     def needs_tail(self):
@@ -784,10 +794,43 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
     def _cells_by_row(self, min_col, min_row, max_col, max_row, values_only=False):
         max_col = max_col or self.max_column
         max_row = max_row or self.max_row
-        base = self._ext_base_rows(min_col, min_row, max_col, max_row, values_only)
-        if not (self._overlay or self._merge is not None):
-            return base
-        return self._apply_overlays(base, min_col, min_row, max_col, max_row, values_only)
+        rows = self._ext_base_rows(min_col, min_row, max_col, max_row, values_only)
+        if self._overlay or self._merge is not None:
+            rows = self._apply_overlays(rows, min_col, min_row, max_col, max_row, values_only)
+        if self._ext.create_empty_cells and not values_only:
+            rows = self._create_empty(rows, min_row, min_col)
+        return rows
+
+    def _create_empty(self, rows, min_row, min_col):
+        """
+        create_empty_cells: the cell full mode creates when an empty position
+        is accessed (``coordinate``, value None, default style), instead of
+        read-only mode's shared EmptyCell; rows keep read-only mode's shape
+        """
+        # _new_cell, inlined (empty sheets can have millions of positions);
+        # one default StyleArray for all of them, as read-only cells share
+        # theirs through wb._cell_styles
+        cell_cls = self._ext_cell_cls()
+        new = cell_cls.__new__
+        style = StyleArray()
+        names = (["formula", "cached_value"] if self._ext.formula_and_value else []) + self._ext_extra_slots()
+        empty = EMPTY_CELL
+        ws = self
+
+        def make(r, col):
+            c = new(cell_cls)
+            c.parent = ws
+            c.row = r
+            c.column = col
+            c._value = None
+            c.data_type = "n"
+            c._style_id = style
+            for name in names:
+                setattr(c, name, None)
+            return c
+
+        for r, row in enumerate(rows, min_row):
+            yield tuple([make(r, col) if c is empty else c for col, c in enumerate(row, min_col)])
 
     def _ext_base_rows(self, min_col, min_row, max_col, max_row, values_only):
         """openpyxl's read-only row stream (with extended cells)"""
@@ -908,9 +951,12 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
 
     def _get_cell(self, row, column):
         """Cells are returned by a generator which can be empty"""
-        for row in self._cells_by_row(column, row, column, row):
-            if row:
-                return row[0]
+        for cells in self._cells_by_row(column, row, column, row):
+            if cells:
+                return cells[0]
+        if self._ext.create_empty_cells:
+            # beyond the rows of the file: full mode creates the cell too
+            return self._new_cell(self._ext_cell_cls(), self._ext_extra_slots(), row, column)
         return EMPTY_CELL if self._ext.cell_level else _EMPTY()
 
     # -- overlays -------------------------------------------------------------

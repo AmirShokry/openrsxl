@@ -127,7 +127,7 @@ def test_rich_single_flag(flag):
 
 def test_rich_flag_pairs():
     for a, b in itertools.combinations(
-        ["formula_and_value", "read_comments", "read_hyperlinks", "read_merged_cells"], 2
+        ["formula_and_value", "read_comments", "read_hyperlinks", "read_merged_cells", "create_empty_cells"], 2
     ):
         assert compare_extended(RICH, flags={a: True, b: True}) == [], (a, b)
 
@@ -178,7 +178,7 @@ def test_formula_and_value_requires_read_only():
 
 
 def test_full_mode_flags_are_noops():
-    wb = ext.load_workbook(io.BytesIO(RICH), read_comments=True, read_merged_cells=True)
+    wb = ext.load_workbook(io.BytesIO(RICH), read_comments=True, read_merged_cells=True, create_empty_cells=True)
     assert type(wb["Main"]).__name__ == "Worksheet"
 
 
@@ -192,6 +192,61 @@ def test_signature_extends_openpyxl():
         assert sig[name].kind is inspect.Parameter.KEYWORD_ONLY
         assert sig[name].default is False
     assert ext.open is ext.load_workbook
+
+
+def test_create_empty_cells():
+    # full mode creates a Cell (coordinate, default style) when an empty
+    # position is accessed; read-only mode yields the shared EmptyCell
+    from oracle.compare import norm  # (ArrayFormula objects have no __eq__, as in openpyxl)
+
+    plain = ext.load_workbook(io.BytesIO(RICH), read_only=True)["Main"]
+    wb = ext.load_workbook(io.BytesIO(RICH), read_only=True, create_empty_cells=True)
+    ws = wb["Main"]
+    full = openrsxl.load_workbook(io.BytesIO(RICH))["Main"]
+    n_styles = len(wb._cell_styles)
+    empty = 0
+    for prow, row in zip(plain.iter_rows(), ws.iter_rows()):
+        assert len(prow) == len(row)  # read-only mode's row shape
+        for p, c in zip(prow, row):
+            if type(p).__name__ != "EmptyCell":
+                assert c.coordinate == p.coordinate and norm(c.value) == norm(p.value)
+                continue
+            assert type(c).__name__ == "ReadOnlyCell" and c.parent is ws
+            if (c.row, c.column) in full._cells:
+                continue  # eg. a MergedCell: merges are off here (the oracle covers them)
+            empty += 1
+            f = full.cell(c.row, c.column)  # created on access
+            assert (c.coordinate, c.value, c.data_type, c.is_date, c.has_style) == (
+                f.coordinate,
+                None,
+                "n",
+                False,
+                False,
+            )
+            for attr in ("number_format", "font", "fill", "border", "alignment", "protection"):
+                # (full mode's StyleProxy compares its target: left operand)
+                assert getattr(f, attr) == getattr(c, attr), attr
+            with pytest.raises(AttributeError):
+                _ = c.formula  # disabled features do not exist
+    assert empty > 100
+    assert len(wb._cell_styles) == n_styles  # the style registry is untouched
+    assert norm(list(ws.iter_rows(values_only=True))) == norm(list(plain.iter_rows(values_only=True)))
+    # single cells, inside and beyond the rows of the file
+    assert type(plain["A3"]).__name__ == "EmptyCell"
+    assert ws["A3"].coordinate == "A3" and ws["A3"] is not ws["A3"]  # new objects, nothing kept
+    far = ws.cell(1000, 100)
+    assert (far.coordinate, far.value, far.row, far.column) == ("CV1000", None, 1000, 100)
+    # rows keep read-only mode's shape: none after the last row of the file
+    assert len(list(ws.iter_rows(max_row=500))) == len(list(plain.iter_rows(max_row=500))) == 60
+    # with the cell features: their attributes exist, all None
+    ws = ext.load_workbook(
+        io.BytesIO(RICH),
+        read_only=True,
+        create_empty_cells=True,
+        **dict.fromkeys(["formula_and_value", "read_comments", "read_hyperlinks"], True),
+    )["Main"]
+    c = ws["A3"]
+    assert (c.formula, c.cached_value, c.comment, c.hyperlink) == (None, None, None, None)
 
 
 def test_values_only_with_merges():

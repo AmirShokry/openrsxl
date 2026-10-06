@@ -48,6 +48,7 @@ def load_workbook(
     read_data_validations=False,
     read_conditional_formatting=False,
     read_tables=False,
+    create_empty_cells=False,
 ):
     """Open the given filename and return the workbook
 
@@ -71,10 +72,16 @@ def load_workbook(
     :param read_data_validations: ``ws.data_validations``
     :param read_conditional_formatting: ``ws.conditional_formatting``
     :param read_tables: ``ws.tables``
+    :param create_empty_cells: every empty position of a row is a cell like
+        the one full mode creates when it is accessed - ``coordinate``,
+        ``row``, ``column``, value None, default style, None for the enabled
+        features - instead of read-only mode's shared, coordinate-less
+        ``EmptyCell``; created on the fly, nothing is kept
 
-    The ``read_*`` flags have no effect without ``read_only=True`` (full mode
-    always reads everything); ``formula_and_value`` requires
-    ``read_only=True``. Without any flag the result is exactly openpyxl's.
+    The ``read_*`` flags and ``create_empty_cells`` have no effect without
+    ``read_only=True`` (full mode always reads everything and creates cells
+    on access); ``formula_and_value`` requires ``read_only=True``. Without
+    any flag the result is exactly openpyxl's.
 
     Example::
 
@@ -106,6 +113,7 @@ def load_workbook(
         read_data_validations=read_data_validations,
         read_conditional_formatting=read_conditional_formatting,
         read_tables=read_tables,
+        create_empty_cells=create_empty_cells,
     )
     if formula_and_value and not read_only:
         raise ValueError("formula_and_value=True requires read_only=True")

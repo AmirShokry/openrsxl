@@ -95,7 +95,7 @@ def main(path):
     wb = load_workbook(path, read_only=True, read_comments=True)
     for row in wb.worksheets[0].iter_rows():
         for cell in row:
-            if getattr(cell, "comment", None) is not None:
+            if cell.comment is not None:  # (None for empty and merged cells too)
                 print(cell.coordinate, repr(cell.comment.text), "by", cell.comment.author)
     wb.close()
 
@@ -103,7 +103,7 @@ def main(path):
     wb = load_workbook(path, read_only=True, read_hyperlinks=True)
     for row in wb.worksheets[0].iter_rows():
         for cell in row:
-            if getattr(cell, "hyperlink", None) is not None:
+            if cell.hyperlink is not None:
                 link = cell.hyperlink
                 # as in full mode, an empty linked cell gets the target as value
                 print(cell.coordinate, repr(cell.value), "->", link.target or link.location)
@@ -151,6 +151,19 @@ def main(path):
         print("table:", table.displayName, table.ref)
     wb.close()
 
+    section("create_empty_cells: full mode's cells at empty positions")
+    # read-only mode yields one shared, coordinate-less EmptyCell for every
+    # empty position; full mode creates a Cell there when it is accessed
+    wb = load_workbook(path, read_only=True)
+    row = next(wb.worksheets[0].iter_rows(min_row=5, max_row=5))  # an empty row
+    print("without:", [type(c).__name__ for c in row])
+    wb.close()
+    wb = load_workbook(path, read_only=True, create_empty_cells=True)
+    row = next(wb.worksheets[0].iter_rows(min_row=5, max_row=5))
+    print("with:   ", [c.coordinate for c in row], [c.value for c in row])
+    print("B5:", repr(row[1].number_format), "has_style:", row[1].has_style)  # full mode's default style
+    wb.close()
+
     section("all flags at once, values_only")
     flags = dict(
         formula_and_value=True,
@@ -162,6 +175,7 @@ def main(path):
         read_data_validations=True,
         read_conditional_formatting=True,
         read_tables=True,
+        create_empty_cells=True,
     )
     wb = load_workbook(path, read_only=True, **flags)
     for row in wb.worksheets[0].iter_rows(values_only=True):
