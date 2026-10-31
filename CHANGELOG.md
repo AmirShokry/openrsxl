@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 * Fixed: after a failed `save` (eg. a timezone-aware datetime, TypeError)
   the temporary worksheet file stayed open until garbage collection
