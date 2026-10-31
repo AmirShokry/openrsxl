@@ -127,12 +127,31 @@ wb.close()
 
 ### The flags
 
-All flags are keyword-only, default to `False` and need `read_only=True`
-(full mode already reads everything; `formula_and_value` raises `ValueError`
-without `read_only=True`, the other flags are ignored).
+All flags are keyword-only and need `read_only=True` (full mode already
+reads everything: the flags are ignored there, except an explicit
+`formula_and_value=True`, which raises `ValueError`).
+
+**`read_all=True` turns every feature on.** A feature flag you pass
+explicitly always wins over `read_all`, so you can start from everything and
+switch features off, or leave `read_all` off and switch features on:
+
+```python
+from openrsxl.extended import load_workbook
+
+load_workbook(path, read_only=True, read_all=True)                       # every feature
+load_workbook(path, read_only=True, read_all=True, read_comments=False,
+              create_empty_cells=False)                                   # all but these two
+load_workbook(path, read_only=True, read_comments=True)                  # only comments
+load_workbook(path, read_only=True)                                       # none: openpyxl's read-only mode
+```
+
+The feature flags default to `None` ("not given": follow `read_all`, which
+defaults to `False`); `True` / `False` enable / disable a feature whatever
+`read_all` says.
 
 | flag | what it adds (names and types of openpyxl's full mode) |
 |---|---|
+| `read_all` | every feature below that is not given explicitly. |
 | `formula_and_value` | `cell.formula`: the formula as openpyxl reads it with `data_only=False` - a `str` starting with `=`, an `ArrayFormula` or a `DataTableFormula` - or `None` for cells without formula; `cell.cached_value`: the value openpyxl reads with `data_only=True` (the result Excel saved). Both in one pass, where openpyxl needs two full loads. |
 | `read_comments` | `cell.comment` (`Comment` or `None`). |
 | `read_hyperlinks` | `cell.hyperlink` (`Hyperlink` or `None`); as in full mode, an empty cell with a link gets the link target as its value. |
@@ -143,6 +162,23 @@ without `read_only=True`, the other flags are ignored).
 | `read_conditional_formatting` | `ws.conditional_formatting`. |
 | `read_tables` | `ws.tables`. |
 | `create_empty_cells` | a cell at every empty position, like the one full mode creates when the position is accessed: `coordinate`, `row`, `column`, value `None`, default style (and `None` for the enabled cell features), instead of read-only mode's shared, coordinate-less `EmptyCell`. Created on the fly (nothing is kept); rows keep read-only mode's shape. |
+
+**Compatibility rule.** Everything openpyxl's read-only mode already has
+(`iter_rows`, `rows`, `values`, `ws.cell()`, `ws["A1:C3"]`, `max_row`,
+`calculate_dimension()`, `reset_dimensions()`, cell attributes, errors)
+keeps its interface, return types and errors with any flag, so code written
+for openpyxl's read-only mode runs unchanged; a feature only changes what
+openpyxl's full mode would return differently for the same file (a cell
+covered by a merged range is a `MergedCell`, an empty position is a cell
+with `create_empty_cells`, cells created by a feature can extend
+`max_row` / `max_column`).
+
+**Why `create_empty_cells` is not the default.** It gives full mode's cells,
+but the default must stay exactly openpyxl's read-only mode (the shared
+`EmptyCell`), so that `openrsxl.extended.load_workbook` is a drop-in
+replacement without flags. `read_all=True` includes it; add
+`create_empty_cells=False` to keep read-only mode's `EmptyCell` while
+enabling everything else (sparse sheets: no object per empty position).
 
 Every value is what openpyxl's full mode returns for the same file - same
 attribute names, same types, same values. The only new names are

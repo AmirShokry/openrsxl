@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+* `openrsxl.extended.load_workbook(..., read_all=True)`: every streaming
+  feature with one flag. A feature flag given explicitly wins over it
+  (`read_all=True, read_comments=False`: everything but comments); the
+  feature flags now default to `None` ("not given", following `read_all`,
+  which defaults to `False`), so a call without flags is still exactly
+  openpyxl's read-only mode.
+* Fixed (extended): the empty cells and merged cells of a streamed sheet had
+  the attributes of every cell feature (`cell.comment` was `None` without
+  `read_comments`); they now have those of the enabled features only, like
+  the other cells (`AttributeError` otherwise; `MergedCell` without
+  `formula_and_value` is openpyxl's own).
+* Fixed (extended): `create_empty_cells` created cells at positions before
+  A1 (`iter_rows(min_row=-1)` gave cells `A-1`, `A0`); full mode has no cell
+  there, so these stay read-only mode's `EmptyCell`.
+* Fixed (extended): `pickle` of a streamed `MergedCellRange` failed on its
+  class name; it now fails like openpyxl's read-only objects (the worksheet
+  holds the open file).
+
 ## 0.2.1
 
 * Fixed: after a failed `save` (eg. a timezone-aware datetime, TypeError)

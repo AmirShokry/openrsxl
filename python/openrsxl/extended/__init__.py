@@ -23,8 +23,10 @@ Additions:
     ``read_hyperlinks``, ``read_merged_cells``, ``read_dimensions``,
     ``read_sheet_properties``, ``read_data_validations``,
     ``read_conditional_formatting``, ``read_tables``), and full mode's cells
-    at empty positions (``create_empty_cells``). Without a flag it is
-    exactly openpyxl's ``load_workbook``. See ``help(load_workbook)``, the
+    at empty positions (``create_empty_cells``); ``read_all=True`` enables
+    every feature not given explicitly (``read_all=True,
+    read_comments=False``: all but comments). Without a flag it is exactly
+    openpyxl's ``load_workbook``. See ``help(load_workbook)``, the
     README and docs/COMPATIBILITY.md (limitations).
 
 ``install_as_openpyxl()``

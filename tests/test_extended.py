@@ -188,10 +188,72 @@ def test_signature_extends_openpyxl():
     base = inspect.signature(openpyxl.load_workbook).parameters
     sig = inspect.signature(ext.load_workbook).parameters
     assert list(sig)[: len(base)] == list(base)
+    assert sig["read_all"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert sig["read_all"].default is False
     for name in FLAG_NAMES:
         assert sig[name].kind is inspect.Parameter.KEYWORD_ONLY
-        assert sig[name].default is False
+        assert sig[name].default is None  # unset: follows read_all
     assert ext.open is ext.load_workbook
+
+
+def _enabled(wb):
+    from openrsxl.extended._streaming import FLAGS
+
+    opt = getattr(wb["Main"], "_ext", None)
+    return {f for f in FLAGS if getattr(opt, f, False)}
+
+
+@pytest.mark.parametrize(
+    "kw, expected",
+    [
+        ({}, set()),
+        ({"read_all": True}, set(FLAG_NAMES)),
+        ({"read_all": True, "read_comments": False}, set(FLAG_NAMES) - {"read_comments"}),
+        (
+            {"read_all": True, "create_empty_cells": False, "formula_and_value": False},
+            set(FLAG_NAMES) - {"create_empty_cells", "formula_and_value"},
+        ),
+        ({"read_all": False, "read_tables": True}, {"read_tables"}),
+        ({"read_comments": True, "read_hyperlinks": False}, {"read_comments"}),
+        ({"read_all": True, **{f: False for f in FLAG_NAMES}}, set()),
+    ],
+)
+def test_read_all_and_explicit_flags(kw, expected):
+    wb = ext.load_workbook(io.BytesIO(RICH), read_only=True, **kw)
+    assert _enabled(wb) == expected
+    if not expected:
+        assert type(wb["Main"]) is openrsxl.worksheet._read_only.ReadOnlyWorksheet
+
+
+def test_read_all_is_every_flag():
+    assert compare_extended(RICH, flags={"read_all": True}) == []
+    a = ext.load_workbook(io.BytesIO(RICH), read_only=True, read_all=True)
+    b = ext.load_workbook(io.BytesIO(RICH), read_only=True, **ALL_FLAGS)
+    assert [[repr(c) for c in r] for r in a["Main"].iter_rows()] == [
+        [repr(c) for c in r] for r in b["Main"].iter_rows()
+    ]
+
+
+def test_read_all_in_full_mode_is_a_noop():
+    wb = ext.load_workbook(io.BytesIO(RICH), read_all=True)
+    assert type(wb["Main"]).__name__ == "Worksheet"
+    with pytest.raises(ValueError):
+        ext.load_workbook(io.BytesIO(RICH), read_all=True, formula_and_value=True)
+
+
+def test_create_empty_cells_not_before_a1():
+    # rows / columns < 1 (iter_rows(min_row=-1)): full mode has no cell there,
+    # read-only mode's EmptyCell stays
+    ro = openpyxl.load_workbook(io.BytesIO(RICH), read_only=True)["Main"]
+    ws = ext.load_workbook(io.BytesIO(RICH), read_only=True, create_empty_cells=True)["Main"]
+    kw = dict(min_row=-1, max_row=2, max_col=3)
+    names = [[type(c).__name__ for c in r] for r in ws.iter_rows(**kw)]
+    assert names[:2] == [["EmptyCell"] * 3] * 2
+    assert [[getattr(c, "coordinate", None) for c in r] for r in ws.iter_rows(**kw)][2:] == [
+        ["A1", "B1", "C1"],
+        ["A2", "B2", "C2"],
+    ]
+    assert len(list(ro.iter_rows(**kw))) == len(names)
 
 
 def test_create_empty_cells():
@@ -609,3 +671,22 @@ def test_merged_start_cell():
     # created when the file has no top-left cell
     assert {r.coord: r for r in ws.merged_cells}["B12:H12"].start_cell.value is None
     assert str(copy.copy(rng)) == "A1:C2" and copy.copy(rng).start_cell.value == "title"
+
+
+@pytest.mark.parametrize("flag", FLAG_NAMES)
+def test_disabled_features_do_not_exist_on_any_cell(flag):
+    # empty and merged cells have the attributes of the enabled features
+    # only, as the other cells (MergedCell: openpyxl's own, which always has
+    # hyperlink / comment, as in full mode)
+    features = {"formula_and_value": ("formula", "cached_value"), "read_hyperlinks": ("hyperlink",)}
+    features["read_comments"] = ("comment",)
+    ws = ext.load_workbook(io.BytesIO(RICH), read_only=True, **{"read_merged_cells": True, flag: True})["Main"]
+    expected = {a for f, names in features.items() if f == flag for a in names}
+    every = {"formula", "cached_value", "hyperlink", "comment"}
+    for row in ws.iter_rows(max_row=80, max_col=35):
+        for c in row:
+            has = {a for a in every if hasattr(c, a)}
+            if type(c).__name__ == "MergedCell":
+                assert has == expected | {"hyperlink", "comment"}, (flag, c)
+            else:
+                assert has == expected, (flag, type(c).__name__, has)

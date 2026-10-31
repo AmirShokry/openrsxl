@@ -164,22 +164,15 @@ def main(path):
     print("B5:", repr(row[1].number_format), "has_style:", row[1].has_style)  # full mode's default style
     wb.close()
 
-    section("all flags at once, values_only")
-    flags = dict(
-        formula_and_value=True,
-        read_comments=True,
-        read_hyperlinks=True,
-        read_merged_cells=True,
-        read_dimensions=True,
-        read_sheet_properties=True,
-        read_data_validations=True,
-        read_conditional_formatting=True,
-        read_tables=True,
-        create_empty_cells=True,
-    )
-    wb = load_workbook(path, read_only=True, **flags)
+    section("read_all: every feature at once (explicit flags win), values_only")
+    wb = load_workbook(path, read_only=True, read_all=True)
     for row in wb.worksheets[0].iter_rows(values_only=True):
         print(row)  # merged cells are None, link targets fill empty cells (full mode)
+    wb.close()
+    # everything except cells at empty positions and comments
+    wb = load_workbook(path, read_only=True, read_all=True, create_empty_cells=False, read_comments=False)
+    row = next(wb.worksheets[0].iter_rows(min_row=5, max_row=5))
+    print("empty row:", [type(c).__name__ for c in row], "| has comment:", hasattr(row[0], "comment"))
     wb.close()
 
     section("disabled features do not exist (as in openpyxl's read-only mode)")

@@ -167,6 +167,12 @@ def compare_extended(src, data_only=False, flags=None, rsxl=None, oracle=None, l
     if oracle is None:
         import openpyxl as oracle
     flags = dict(ALL_FLAGS if flags is None else flags)
+    # the expectations follow the resolved features (read_all: every feature
+    # not given explicitly); the loader gets the flags as given
+    given = flags
+    if "read_all" in flags:
+        flags = {k: bool(flags["read_all"]) for k in ALL_FLAGS}
+        flags.update((k, v) for k, v in given.items() if k != "read_all" and v is not None)
     diffs = []
 
     def diff(msg):
@@ -196,7 +202,7 @@ def compare_extended(src, data_only=False, flags=None, rsxl=None, oracle=None, l
         for k, v in patched.items():
             setattr(WorksheetReader, k, v)
     try:
-        ext, warn_e = _load(rsxl, src, read_only=True, data_only=data_only, **flags)
+        ext, warn_e = _load(rsxl, src, read_only=True, data_only=data_only, **given)
         got_err = None
     except Exception as err:
         got_err = (type(err).__name__, norm_text(str(err)))

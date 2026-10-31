@@ -39,16 +39,17 @@ def load_workbook(
     keep_links=True,
     rich_text=False,
     *,
-    formula_and_value=False,
-    read_comments=False,
-    read_hyperlinks=False,
-    read_merged_cells=False,
-    read_dimensions=False,
-    read_sheet_properties=False,
-    read_data_validations=False,
-    read_conditional_formatting=False,
-    read_tables=False,
-    create_empty_cells=False,
+    read_all=False,
+    formula_and_value=None,
+    read_comments=None,
+    read_hyperlinks=None,
+    read_merged_cells=None,
+    read_dimensions=None,
+    read_sheet_properties=None,
+    read_data_validations=None,
+    read_conditional_formatting=None,
+    read_tables=None,
+    create_empty_cells=None,
 ):
     """Open the given filename and return the workbook
 
@@ -56,6 +57,9 @@ def load_workbook(
     (streaming) workbooks. Each one adds what openpyxl's full mode offers,
     with the same names and types:
 
+    :param read_all: every feature below; a feature given explicitly wins,
+        so ``read_all=True, read_comments=False`` is every feature except
+        comments
     :param formula_and_value: ``cell.formula`` (the formula, as read with
         ``data_only=False``, None for other cells) and ``cell.cached_value``
         (the value as read with ``data_only=True``)
@@ -78,10 +82,12 @@ def load_workbook(
         features - instead of read-only mode's shared, coordinate-less
         ``EmptyCell``; created on the fly, nothing is kept
 
-    The ``read_*`` flags and ``create_empty_cells`` have no effect without
-    ``read_only=True`` (full mode always reads everything and creates cells
-    on access); ``formula_and_value`` requires ``read_only=True``. Without
-    any flag the result is exactly openpyxl's.
+    A feature flag left unset (None) follows ``read_all``; True / False
+    enable / disable it whatever ``read_all`` is. The flags have no effect
+    without ``read_only=True`` (full mode always reads everything and
+    creates cells on access), except an explicit ``formula_and_value=True``,
+    which requires ``read_only=True`` (ValueError). Without any flag the
+    result is exactly openpyxl's.
 
     Example::
 
@@ -90,6 +96,10 @@ def load_workbook(
         for row in wb.active.iter_rows():
             for cell in row:
                 cell.value, cell.formula, cell.cached_value, cell.comment
+
+        # everything full mode has, except cells at empty positions
+        wb = load_workbook("book.xlsx", read_only=True, read_all=True,
+                           create_empty_cells=False)
 
     Rows are streamed as in read-only mode (memory does not grow with the
     number of cells) and every value is what openpyxl's full mode returns
@@ -103,7 +113,7 @@ def load_workbook(
     cell data that make full mode fail at load time are raised while
     iterating; images, charts, drawings and pivot tables are not streamed.
     """
-    options = _Options(
+    given = dict(
         formula_and_value=formula_and_value,
         read_comments=read_comments,
         read_hyperlinks=read_hyperlinks,
@@ -117,6 +127,7 @@ def load_workbook(
     )
     if formula_and_value and not read_only:
         raise ValueError("formula_and_value=True requires read_only=True")
+    options = _Options(**{k: bool(read_all) if v is None else v for k, v in given.items()})
     if not read_only or not any(getattr(options, k) for k in FLAGS):
         # exactly openpyxl
         reader = ExcelReader(filename, read_only, keep_vba, data_only, keep_links, rich_text)

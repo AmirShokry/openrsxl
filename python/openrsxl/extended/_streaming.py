@@ -9,6 +9,8 @@ returns for the same file - same attribute names, same types, same values:
 =============================  ==============================================
 flag                           adds
 =============================  ==============================================
+``read_all``                   every feature below not given explicitly
+                               (True / False); unset flags (None) follow it
 ``formula_and_value``          ``cell.formula`` and ``cell.cached_value``
 ``read_comments``              ``cell.comment``
 ``read_hyperlinks``            ``cell.hyperlink`` (and the value openpyxl
@@ -55,7 +57,7 @@ from openrsxl.worksheet.dimensions import (
     SheetFormatProperties,
 )
 from openrsxl.worksheet.filters import AutoFilter
-from openrsxl.worksheet.merge import MergedCellRange
+from openrsxl.worksheet.merge import MergedCellRange as _MergedCellRange
 from openrsxl.worksheet.page import PageMargins, PrintOptions, PrintPageSetup
 from openrsxl.worksheet.pagebreak import ColBreak, RowBreak
 from openrsxl.worksheet.print_settings import PrintArea
@@ -138,7 +140,8 @@ class ReadOnlyCell(_ReadOnlyCell):
 
 
 class EmptyCell(_EmptyCell):
-    """Missing cells of openrsxl.extended streaming worksheets."""
+    """Missing cells of openrsxl.extended streaming worksheets (every cell
+    feature enabled; see _empty_cell)."""
 
     __slots__ = ()
     formula = None
@@ -148,10 +151,29 @@ class EmptyCell(_EmptyCell):
 
 
 EMPTY_CELL = EmptyCell()
+_EMPTY_CELLS = {tuple(ReadOnlyCell.__slots__): EMPTY_CELL}
+
+
+def _empty_cell(names):
+    """
+    The shared EmptyCell of worksheets whose cells have the attributes
+    `names`: None for those, none of the others (AttributeError, as on the
+    cells of a disabled feature); read-only mode's own without any.
+    """
+    names = tuple(names)
+    if not names:
+        return _EMPTY()
+    cell = _EMPTY_CELLS.get(names)
+    if cell is None:
+        attrs = {"__slots__": (), "__module__": __name__, "__doc__": EmptyCell.__doc__}
+        attrs.update(dict.fromkeys(names))
+        cell = _EMPTY_CELLS[names] = type("EmptyCell", (_EmptyCell,), attrs)()
+    return cell
 
 
 class MergedCell(_MergedCell):
-    """MergedCell of openrsxl.extended (adds formula / cached_value)."""
+    """MergedCell of openrsxl.extended with formula_and_value (adds formula /
+    cached_value; openpyxl's MergedCell otherwise)."""
 
     __slots__ = ()
     formula = None
@@ -174,6 +196,20 @@ class _Options:
             or self.read_merged_cells
             or self.create_empty_cells
         )
+
+    @property
+    def cell_names(self):
+        """Attributes the cells get from the enabled features"""
+        names = ["formula", "cached_value"] if self.formula_and_value else []
+        if self.read_hyperlinks:
+            names.append("hyperlink")
+        if self.read_comments:
+            names.append("comment")
+        return names
+
+    @property
+    def merged_cell_cls(self):
+        return MergedCell if self.formula_and_value else _MergedCell
 
     @property
     def needs_tail(self):
@@ -406,7 +442,7 @@ class _MergeInfo:
                 rng = self.ranges[group[0]]
                 rep = self._representative(rng)
                 self._place(shadow, present, rng, rep)
-                mcr = MergedCellRange(shadow, rep.coord)
+                mcr = _MergedCellRange(shadow, rep.coord)
                 shadow._clean_merge_range(mcr)
                 styles[group[0]] = (rep, self._results(shadow, rep))
                 continue
@@ -418,7 +454,7 @@ class _MergeInfo:
                             shadow, row=coord[0], column=coord[1], style_array=wb._cell_styles[present[coord]]
                         )
             for i in group:
-                mcr = MergedCellRange(shadow, self.ranges[i].coord)
+                mcr = _MergedCellRange(shadow, self.ranges[i].coord)
                 shadow._clean_merge_range(mcr)
                 # the cell object full mode keeps as this range's start_cell
                 # (later overlapping ranges may replace it in ws._cells)
@@ -477,7 +513,7 @@ class _MergeInfo:
         return results[(r, c)]
 
 
-class StreamedMergedCellRange(MergedCellRange):
+class StreamedMergedCellRange(_MergedCellRange):
     """
     MergedCellRange of a streamed worksheet.
 
@@ -503,6 +539,8 @@ class StreamedMergedCellRange(MergedCellRange):
 
 
 StreamedMergedCellRange.__name__ = StreamedMergedCellRange.__qualname__ = "MergedCellRange"
+# the name resolves to the class (pickle)
+MergedCellRange = StreamedMergedCellRange
 
 
 class ReadOnlyWorksheet(_ReadOnlyWorksheet):
@@ -653,7 +691,7 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
                 continue
             shadow = merge.shadow_starts[i]
             if isinstance(shadow, _MergedCell):
-                c = MergedCell(self, key[0], key[1])
+                c = self._ext.merged_cell_cls(self, key[0], key[1])
                 c._style = copy(shadow._style)
             else:
                 c = base_cells.get(key)
@@ -783,6 +821,12 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
     def _ext_cell_cls(self):
         return ReadOnlyCell if self._ext.cell_level else _ReadOnlyCell
 
+    def _ext_empty(self):
+        """the filler of empty positions"""
+        if self.__dict__.get("_empty") is None:
+            self._empty = _empty_cell(self._ext.cell_names) if self._ext.cell_level else _EMPTY()
+        return self._empty
+
     def _ext_extra_slots(self):
         extra = []
         if self._ext.read_hyperlinks:
@@ -813,8 +857,8 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
         cell_cls = self._ext_cell_cls()
         new = cell_cls.__new__
         style = StyleArray()
-        names = (["formula", "cached_value"] if self._ext.formula_and_value else []) + self._ext_extra_slots()
-        empty = EMPTY_CELL
+        names = self._ext.cell_names
+        empty = self._ext_empty()
         ws = self
 
         def make(r, col):
@@ -830,11 +874,18 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
             return c
 
         for r, row in enumerate(rows, min_row):
+            if r < 1 or min_col < 1:
+                # positions before A1 (iter_rows(min_row=0)): full mode has
+                # no cell there (ws.cell raises), read-only mode's EmptyCell
+                yield tuple(
+                    [make(r, col) if c is empty and r >= 1 and col >= 1 else c for col, c in enumerate(row, min_col)]
+                )
+                continue
             yield tuple([make(r, col) if c is empty else c for col, c in enumerate(row, min_col)])
 
     def _ext_base_rows(self, min_col, min_row, max_col, max_row, values_only):
         """openpyxl's read-only row stream (with extended cells)"""
-        filler = None if values_only else (EMPTY_CELL if self._ext.cell_level else _EMPTY())
+        filler = None if values_only else self._ext_empty()
         empty_row = []
         if max_col is not None:
             empty_row = (filler,) * (max_col + 1 - min_col)
@@ -957,7 +1008,7 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
         if self._ext.create_empty_cells:
             # beyond the rows of the file: full mode creates the cell too
             return self._new_cell(self._ext_cell_cls(), self._ext_extra_slots(), row, column)
-        return EMPTY_CELL if self._ext.cell_level else _EMPTY()
+        return self._ext_empty()
 
     # -- overlays -------------------------------------------------------------
     def _apply_overlays(self, base, min_col, min_row, max_col, max_row, values_only):
@@ -978,7 +1029,7 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
             if max_row is not None:
                 last = min(last, max_row)
             if max_col is not None:
-                filler = None if values_only else (EMPTY_CELL if self._ext.cell_level else _EMPTY())
+                filler = None if values_only else self._ext_empty()
                 pad = (filler,) * max(0, max_col + 1 - min_col)
             else:
                 pad = ()
@@ -1005,7 +1056,7 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
                 needed = min(needed, max_col + 1 - min_col)
             cells = list(row)
             if needed > width:
-                filler = None if values_only else (EMPTY_CELL if self._ext.cell_level else _EMPTY())
+                filler = None if values_only else self._ext_empty()
                 cells.extend([filler] * (needed - width))
             # 1. merged cells
             for i in active:
@@ -1023,7 +1074,7 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
                         cells[k] = None
                     else:
                         shadow = merge.spec(i, row_idx, col)
-                        m = MergedCell(self, row_idx, col)
+                        m = self._ext.merged_cell_cls(self, row_idx, col)
                         if shadow._style is not None:
                             m._style = copy(shadow._style)
                         cells[k] = m

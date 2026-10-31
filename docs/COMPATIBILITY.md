@@ -151,9 +151,17 @@ choices:
   missing in openpyxl's read-only mode (the added attributes are plain slots,
   read at C speed). With no flag set, `openrsxl.extended.load_workbook`
   returns the plain openpyxl read-only objects.
-* **Full mode.** The `read_*` flags and `create_empty_cells` have no effect
-  without `read_only=True` (full mode reads everything and creates cells on
-  access anyway). `formula_and_value=True` requires `read_only=True`
+* **Flags.** `read_all=True` enables every feature; a feature flag given
+  explicitly (`True` / `False`) wins over it, a feature flag left at its
+  default (`None`) follows it. Without any flag the objects are openpyxl's
+  read-only ones; with flags, everything read-only mode already offers keeps
+  its interface, types and errors, and only what full mode returns
+  differently for the same file changes (`MergedCell` objects, cells at
+  empty positions, `max_row` / `max_column` extended by cells a feature
+  creates).
+* **Full mode.** The flags (`read_all` included) have no effect without
+  `read_only=True` (full mode reads everything and creates cells on access
+  anyway); an explicit `formula_and_value=True` requires `read_only=True`
   (`ValueError` otherwise).
 * **values_only.** `iter_rows(values_only=True)` yields `value` (following
   `data_only`); the other features are only visible on cell objects, except
@@ -172,8 +180,11 @@ choices:
   enabled cell features. They are created while iterating and not kept (a
   new object on every access); rows keep read-only mode's shape (no rows
   after the last row of the file, as in openpyxl's read-only mode, except
-  `ws.cell()` / `ws["A1"]`, which give the cell of any position). Cost: about
-  0.2 µs per empty position, no memory.
+  `ws.cell()` / `ws["A1"]`, which give the cell of any position). Positions
+  before A1 (`iter_rows(min_row=-1)`) stay `EmptyCell`s: full mode has no
+  cell there (`ws.cell(0, 1)` raises). Cost: about 0.2 µs per empty
+  position, no memory. It is not the default because the default is exactly
+  openpyxl's read-only mode; `read_all=True` includes it.
 * **MergedCellRange.start_cell** is the top-left cell as full mode has it
   (value, borders of the range, hyperlink, comment, formula / cached value),
   including full mode's quirk for overlapping ranges (the range keeps the
