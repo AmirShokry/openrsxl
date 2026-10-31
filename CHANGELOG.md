@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 * `openrsxl.extended.llm`: lossless, LLM readable compression of workbooks.
   `compress_workbook(path, include=..., output=...)` streams every
