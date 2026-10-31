@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
 * `openrsxl.extended.load_workbook(..., read_all=True)`: every streaming
   feature with one flag. A feature flag given explicitly wins over it
