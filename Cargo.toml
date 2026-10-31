@@ -28,7 +28,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # "extension-module" is enabled by maturin (pyproject.toml), so that `cargo test`
 # links against libpython on every platform
-pyo3 = "0.29"
+pyo3 = "0.30"
 memchr = "2"
 
 [profile.release]
