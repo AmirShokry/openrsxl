@@ -18,6 +18,7 @@ use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::{PyTraverseError, PyVisit};
 
 use crate::sheet::DT_NAMES;
 use crate::store::{
@@ -798,6 +799,26 @@ fn owned(c: Classified<'_>) -> Classified<'static> {
 
 #[pymethods]
 impl SheetWriter {
+    /// The writer refers to its worksheet, which (write-only mode) refers
+    /// to the writer: let the garbage collector see the references, or the
+    /// cycle - and the open temporary file - lives until the process exits.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.ws)?;
+        visit.call(&self.write)?;
+        visit.call(&self.cell_styles)?;
+        for o in self.style_cache.values() {
+            visit.call(o)?;
+        }
+        visit.call(&self.style_array_type)?;
+        visit.call(&self.hyperlinks)?;
+        visit.call(&self.add_comment)?;
+        visit.call(&self.fallback)?;
+        visit.call(&self.date_value)?;
+        visit.call(&self.date_value_raw)?;
+        visit.call(&self.safe_string)?;
+        Ok(())
+    }
+
     #[new]
     fn new(
         py: Python<'_>,

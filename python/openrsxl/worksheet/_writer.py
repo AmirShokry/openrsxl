@@ -331,20 +331,29 @@ class WorksheetWriter:
             if not hasattr(out, "write"):
                 out = self._own_fh = open(out, "wb")
             self._raw_out = out
-        with xmlfile(out) as xf:
-            self._stream_xf = xf
-            with xf.element("worksheet", xmlns=SHEET_MAIN_NS):
-                try:
-                    while True:
-                        el = (yield)
-                        if el is True:
-                            yield xf
-                        elif el is None: # et_xmlfile chokes
-                            continue
-                        else:
-                            xf.write(el)
-                except GeneratorExit:
-                    pass
+        try:
+            with xmlfile(out) as xf:
+                self._stream_xf = xf
+                with xf.element("worksheet", xmlns=SHEET_MAIN_NS):
+                    try:
+                        while True:
+                            el = (yield)
+                            if el is True:
+                                yield xf
+                            elif el is None: # et_xmlfile chokes
+                                continue
+                            else:
+                                xf.write(el)
+                    except GeneratorExit:
+                        pass
+        finally:
+            # openrsxl: like the file xmlfile opens itself for openpyxl, the
+            # owned file is closed when the stream ends - also when the
+            # generator is discarded after an error (no ResourceWarning)
+            fh = getattr(self, "_own_fh", None)
+            if fh is not None:
+                fh.close()
+                self._own_fh = None
 
 
     def write_tail(self):

@@ -4,7 +4,7 @@
 //! openpyxl keeps one `Cell` object (plus a `StyleArray`, a key tuple and the
 //! value object) per cell: ~400 bytes. Following the approach of Rust
 //! spreadsheet readers such as calamine, cells read from a file are kept in
-//! struct-of-arrays form, grouped by row (16 bytes per cell, no hash index:
+//! struct-of-arrays form, grouped by row (10 bytes per cell, no hash index:
 //! lookups are binary searches in the row directory and in the row). Formula
 //! text is de-duplicated into relative templates (`=A2+B2` and `=A3+B3`
 //! share one template). The Python `Cell` object is only created when a cell
@@ -421,6 +421,10 @@ pub struct CellStore {
     gen_index: FxMap<u64, u32>,
     gen_live: usize,
     objs: Vec<Option<Py<PyAny>>>,
+    /// the key tuple of `objs[i]`, kept once a key object found the
+    /// (materialised) cell, as a dict keeps its key: iterating the keys of
+    /// materialised cells then hands out the same tuples instead of new ones
+    obj_keys: Vec<Option<Py<PyAny>>>,
     free_objs: Vec<u32>,
     arena: Vec<u8>,
     templates: Vec<Template>,
@@ -549,14 +553,46 @@ impl CellStore {
             i as u64
         } else {
             self.objs.push(Some(o));
+            self.obj_keys.push(None);
             (self.objs.len() - 1) as u64
+        }
+    }
+
+    fn free_obj(&mut self, slot: u64) {
+        self.objs[slot as usize] = None;
+        self.obj_keys[slot as usize] = None;
+        self.free_objs.push(slot as u32);
+    }
+
+    /// The key tuple of the cell at `loc`: the kept one, or a new tuple
+    /// (sharing the int objects of `ints`). New tuples are not kept: that
+    /// would cost a tuple per cell for key identity no caller relies on.
+    fn key_obj(&self, py: Python<'_>, loc: Loc, ints: &mut KeyInts) -> PyResult<Py<PyAny>> {
+        let e = self.entry(loc);
+        if e.kind == K_OBJ {
+            if let Some(k) = &self.obj_keys[e.payload as usize] {
+                return Ok(k.clone_ref(py));
+            }
+        }
+        let (r, c) = unpack(e.key);
+        ints.tuple(py, r, c)
+    }
+
+    /// Keep `key` (an exact `(int, int)` tuple) as the key of the
+    /// materialised cell at `loc` if it has none yet.
+    fn adopt_key(&mut self, loc: Loc, key: &Bound<'_, PyAny>) {
+        let e = self.entry(loc);
+        if e.kind == K_OBJ {
+            let k = &mut self.obj_keys[e.payload as usize];
+            if k.is_none() {
+                *k = Some(key.clone().unbind());
+            }
         }
     }
 
     fn drop_payload(&mut self, e: &Entry) {
         if e.kind == K_OBJ || e.kind == K_PYVAL {
-            self.objs[e.payload as usize] = None;
-            self.free_objs.push(e.payload as u32);
+            self.free_obj(e.payload);
         }
     }
 
@@ -963,12 +999,21 @@ impl CellStore {
         };
         let cell = self.slots.as_ref().unwrap().create(py, &vals)?.unbind();
         if e.kind == K_PYVAL {
-            self.objs[e.payload as usize] = None;
-            self.free_objs.push(e.payload as u32);
+            self.free_obj(e.payload);
         }
         let slot = self.put_obj(cell.clone_ref(py));
         self.set_kind_payload(loc, K_OBJ, slot);
         Ok(cell)
+    }
+
+    /// Raise the TypeError a dict raises for an unhashable key (its message
+    /// depends on the Python version: let a dict produce it).
+    fn check_hashable(py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<()> {
+        if key.hash().is_err() {
+            PyDict::new(py).contains(key)?;
+            key.hash()?;
+        }
+        Ok(())
     }
 
     fn exact_key(key: &Bound<'_, PyAny>) -> Option<u64> {
@@ -1028,10 +1073,10 @@ impl CellStore {
             return Ok(());
         }
         let d = PyDict::new(py);
+        let mut ints = KeyInts::default();
         for loc in self.locs() {
             let obj = self.materialize(py, loc)?;
-            let (r, c) = unpack(self.entry(loc).key);
-            d.set_item(PyTuple::new(py, [r, c])?, obj)?;
+            d.set_item(self.key_obj(py, loc, &mut ints)?, obj)?;
         }
         self.reset();
         self.dict = Some(d.unbind());
@@ -1044,6 +1089,7 @@ impl CellStore {
         self.gen_index = FxMap::default();
         self.gen_live = 0;
         self.objs = Vec::new();
+        self.obj_keys = Vec::new();
         self.free_objs = Vec::new();
         self.arena = Vec::new();
         self.version += 1;
@@ -1123,6 +1169,46 @@ pub struct KeyIter {
     pos: usize,
     len: usize,
     version: u64,
+    ints: KeyInts,
+}
+
+/// Int objects shared by the key tuples created in one pass: one per row
+/// (keys come row by row) and one per column (CPython caches ints up to
+/// 256 only), as the keys of openpyxl's dict share their ints.
+#[derive(Default)]
+pub struct KeyInts {
+    row: Option<(i64, Py<PyAny>)>,
+    cols: Vec<Option<Py<PyAny>>>,
+}
+
+impl KeyInts {
+    fn tuple(&mut self, py: Python<'_>, r: i64, c: i64) -> PyResult<Py<PyAny>> {
+        let row = match &self.row {
+            Some((n, o)) if *n == r => o.clone_ref(py),
+            _ => {
+                let o = r.into_pyobject(py)?.into_any().unbind();
+                self.row = Some((r, o.clone_ref(py)));
+                o
+            }
+        };
+        let col = if c <= 256 || c > 1 << 20 {
+            c.into_pyobject(py)?.into_any().unbind()
+        } else {
+            let i = c as usize;
+            if i >= self.cols.len() {
+                self.cols.resize_with(i + 1, || None);
+            }
+            match &self.cols[i] {
+                Some(o) => o.clone_ref(py),
+                None => {
+                    let o = c.into_pyobject(py)?.into_any().unbind();
+                    self.cols[i] = Some(o.clone_ref(py));
+                    o
+                }
+            }
+        };
+        Ok(PyTuple::new(py, [row, col])?.into_any().unbind())
+    }
 }
 
 #[pymethods]
@@ -1148,20 +1234,15 @@ impl KeyIter {
             let i = self.pos;
             self.pos += 1;
             if s.base.kind(i) != K_DEAD {
-                let row = s.base.row_of(i) as i64;
-                return Ok(Some(
-                    PyTuple::new(py, [row, s.base.col(i) as i64])?
-                        .into_any()
-                        .unbind(),
-                ));
+                let loc = Loc::Base(i, s.base.row_of(i));
+                return Ok(Some(s.key_obj(py, loc, &mut self.ints)?));
             }
         }
         while self.pos - nb < s.gen.len() {
-            let e = s.gen[self.pos - nb];
+            let i = self.pos - nb;
             self.pos += 1;
-            if e.kind != K_DEAD {
-                let (r, c) = unpack(e.key);
-                return Ok(Some(PyTuple::new(py, [r, c])?.into_any().unbind()));
+            if s.gen[i].kind != K_DEAD {
+                return Ok(Some(s.key_obj(py, Loc::Gen(i), &mut self.ints)?));
             }
         }
         Ok(None)
@@ -1193,6 +1274,7 @@ impl CellStore {
             gen_index: FxMap::default(),
             gen_live: 0,
             objs: Vec::new(),
+            obj_keys: Vec::new(),
             free_objs: Vec::new(),
             arena: Vec::new(),
             templates: Vec::new(),
@@ -1210,7 +1292,7 @@ impl CellStore {
         visit.call(&self.ws)?;
         visit.call(&self.cell_styles)?;
         visit.call(&self.shared_strings)?;
-        for o in self.objs.iter().flatten() {
+        for o in self.objs.iter().chain(self.obj_keys.iter()).flatten() {
             visit.call(o)?;
         }
         if let Some(d) = &self.dict {
@@ -1234,6 +1316,7 @@ impl CellStore {
         self.style_args.clear();
         self.row_obj = None;
         self.objs.clear();
+        self.obj_keys.clear();
         self.dict = None;
         self.masters.clear();
         self.dtypes_extra.clear();
@@ -1257,7 +1340,7 @@ impl CellStore {
         if let Some(k) = Self::exact_key(key) {
             return Ok(self.find_key(k).is_some());
         }
-        key.hash()?;
+        Self::check_hashable(py, key)?;
         Ok(self.find(py, key)?.is_some())
     }
 
@@ -1268,15 +1351,22 @@ impl CellStore {
                 None => Err(PyKeyError::new_err((key.clone().unbind(),))),
             };
         }
-        let loc = match Self::exact_key(key) {
+        let exact = Self::exact_key(key);
+        let loc = match exact {
             Some(k) => self.find_key(k),
             None => {
-                key.hash()?;
+                Self::check_hashable(py, key)?;
                 self.find(py, key)?
             }
         };
         match loc {
-            Some(l) => self.materialize(py, l),
+            Some(l) => {
+                let cell = self.materialize(py, l)?;
+                if exact.is_some() {
+                    self.adopt_key(l, key);
+                }
+                Ok(cell)
+            }
             None => Err(PyKeyError::new_err((key.clone().unbind(),))),
         }
     }
@@ -1294,15 +1384,22 @@ impl CellStore {
                 None => default.unwrap_or_else(|| py.None()),
             });
         }
-        let loc = match Self::exact_key(key) {
+        let exact = Self::exact_key(key);
+        let loc = match exact {
             Some(k) => self.find_key(k),
             None => {
-                key.hash()?;
+                Self::check_hashable(py, key)?;
                 self.find(py, key)?
             }
         };
         match loc {
-            Some(l) => self.materialize(py, l),
+            Some(l) => {
+                let cell = self.materialize(py, l)?;
+                if exact.is_some() {
+                    self.adopt_key(l, key);
+                }
+                Ok(cell)
+            }
             None => Ok(default.unwrap_or_else(|| py.None())),
         }
     }
@@ -1316,7 +1413,7 @@ impl CellStore {
         if let Some(d) = &self.dict {
             return d.bind(py).set_item(key, value);
         }
-        key.hash()?;
+        Self::check_hashable(py, key)?;
         let exact = Self::exact_key(key);
         let k = match exact {
             Some(k) => Some(k),
@@ -1326,8 +1423,13 @@ impl CellStore {
             if let Some(loc) = self.find_key(k) {
                 // existing key: keeps its position (and its key object)
                 let old = self.entry(loc);
+                let kept = match old.kind {
+                    K_OBJ => self.obj_keys[old.payload as usize].take(),
+                    _ => None,
+                };
                 self.drop_payload(&old);
                 let slot = self.put_obj(value);
+                self.obj_keys[slot as usize] = kept;
                 self.set_kind_payload(loc, K_OBJ, slot);
                 return Ok(());
             }
@@ -1356,7 +1458,7 @@ impl CellStore {
             }
             return d.del_item(key);
         }
-        key.hash()?;
+        Self::check_hashable(py, key)?;
         match self.find(py, key)? {
             Some(loc) => {
                 self.remove(loc);
@@ -1380,6 +1482,7 @@ impl CellStore {
                 pos: 0,
                 len,
                 version,
+                ints: KeyInts::default(),
             },
         )?
         .into_any())
@@ -1394,9 +1497,9 @@ impl CellStore {
                 .unbind());
         }
         let l = PyList::empty(py);
+        let mut ints = KeyInts::default();
         for loc in self.locs().into_iter().rev() {
-            let (r, c) = unpack(self.entry(loc).key);
-            l.append(PyTuple::new(py, [r, c])?)?;
+            l.append(self.key_obj(py, loc, &mut ints)?)?;
         }
         Ok(l.try_iter()?.into_any().unbind())
     }
@@ -1415,13 +1518,9 @@ impl CellStore {
             return Err(PyKeyError::new_err("popitem(): dictionary is empty"));
         };
         let v = self.materialize(py, loc)?;
-        let (r, c) = unpack(self.entry(loc).key);
+        let k = self.key_obj(py, loc, &mut KeyInts::default())?;
         self.remove(loc);
-        Ok(
-            PyTuple::new(py, [PyTuple::new(py, [r, c])?.into_any().unbind(), v])?
-                .into_any()
-                .unbind(),
-        )
+        Ok(PyTuple::new(py, [k, v])?.into_any().unbind())
     }
 
     // ---------------------------------------------------------------

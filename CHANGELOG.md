@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+* Fixed: after a failed `save` (eg. a timezone-aware datetime, TypeError)
+  the temporary worksheet file stayed open until garbage collection
+  (`ResourceWarning: unclosed file`, file not removable on Windows); it is
+  now closed when the writer is discarded, as in openpyxl.
+* Fixed: a write-only workbook discarded without `save` (eg. after an
+  `append` that raised) kept its temporary worksheet file open until the
+  process exited: the native row writer was part of a worksheet <-> writer
+  reference cycle the garbage collector could not see (atexit then failed
+  to remove the file on Windows). It now supports garbage collection.
+* Fixed: `ws._cells` of loaded worksheets - its views were not reversible
+  and had no `.mapping` (dict views have both) and a different repr; an
+  unhashable key raised `unhashable type` instead of the message of a dict
+  (Python 3.14: "cannot use 'list' as a dict key ..."); `pop()` of an
+  empty store hashed the key (dict raises KeyError / returns the default).
+* Memory: iterating the keys of `ws._cells` (`list(ws._cells)`, `items()`,
+  `reversed`, `popitem`) built a new row and column int with every key
+  tuple, and a new tuple on every pass. Key tuples now share their ints, as
+  the keys of openpyxl's dict do, and a cell object keeps the `(row, col)`
+  tuple it was looked up with. Peak memory of dict operations on a sheet
+  with 1M cells: 515 MB -> 419 MB (openpyxl: 459 MB); time unchanged.
+* `tests/test_api_parity.py`: API parity checks beyond cell values (see
+  docs/DEVELOPMENT.md).
+
 ## 0.2.0
 
 * `openrsxl.extended.load_workbook(..., read_only=True,

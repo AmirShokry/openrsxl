@@ -61,6 +61,13 @@ reference behaviour).
   integer overflows, path traversal ...) in every mode, extended included.
 * `test_cellstore.py`, `test_api_fuzz.py` - random sequences of API calls on
   workbooks loaded by both libraries (state and saved bytes compared).
+* `test_api_parity.py` - API details beyond cell values, both libraries
+  side by side: `ws._cells` views and key errors (empty and non-empty),
+  unusual value types (numpy, int / float / str subclasses, enums,
+  Decimal, Fraction, tz-aware datetimes ...) written into loaded and new
+  workbooks, cell / worksheet / workbook introspection, iteration and error
+  paths, read-only operations, rich text, resources after a failed save
+  and pandas running on openrsxl (`install_as_openpyxl`).
 * `test_fuzz.py` - hypothesis-driven XML / number / formula fuzzing.
 * `test_extended.py` - openrsxl.extended against openpyxl's full mode.
 * `test_api_surface.py` - every public name and signature of openpyxl.

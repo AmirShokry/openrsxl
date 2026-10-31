@@ -63,7 +63,11 @@ types or files produced.
    using `ws._cells` like a dict keeps working, but `type(ws._cells) is dict`
    / `isinstance(ws._cells, dict)` are false (`collections.abc.MutableMapping`
    is true). Worksheets created with `Workbook()` / `create_sheet()` still use
-   a plain dict.
+   a plain dict. Its `keys()` / `values()` / `items()` views behave like
+   dict views (set operations, `reversed()`, `.mapping`, a
+   `dict_keys([...])`-style repr, the same errors) and are
+   `collections.abc` views, but their types are not `dict_keys` /
+   `dict_values` / `dict_items`.
 
 ## Deliberate choices (for byte-identical behaviour)
 
