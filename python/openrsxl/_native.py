@@ -16,8 +16,10 @@ needs CPython's object layout: on other implementations (PyPy's cpyext
 emulation, GraalPy) it is disabled and openpyxl's Python code is used.
 """
 
+import gc
 import os
 import platform
+import weakref
 from io import BytesIO
 
 from openrsxl.xml.functions import fromstring
@@ -277,3 +279,44 @@ def writer_helpers():
             safe_string=safe_string,
         )
     return _WHELPERS
+
+
+# -- memory of closed workbooks ------------------------------------------------
+# A workbook and its worksheets reference each other (ws.parent, wb._sheets),
+# as in openpyxl, so a dropped workbook is freed by the cycle collector, not
+# when its last reference goes. openpyxl's millions of Cell objects make that
+# collector run all the time; openrsxl keeps cells in Rust, creates few
+# Python objects and the collector can wait long, holding the memory of
+# workbooks the program is done with.
+_closed: "weakref.WeakSet" = weakref.WeakSet()
+_closed_pending = False
+
+
+def workbook_closed(wb):
+    """Workbook.close(): drop what a closed workbook cannot use any more (the
+    shared strings of read-only worksheets: their archive is closed) and
+    remember it for collect_closed."""
+    global _closed_pending
+    if getattr(wb, "_read_only", False):
+        for ws in getattr(wb, "_sheets", ()):
+            if getattr(ws, "_shared_strings", None):
+                # a new list: a row iteration still running keeps the old one
+                ws._shared_strings = []
+    try:
+        _closed.add(wb)
+    except TypeError:  # pragma: no cover - not weak-referenceable
+        return
+    _closed_pending = True
+
+
+def collect_closed():
+    """Before loading a workbook: if a workbook closed since the last call
+    is still in memory (waiting for the cycle collector, or still used),
+    run the collector once, so that load / close / load... does not pile up
+    the memory of closed workbooks."""
+    global _closed_pending
+    if not _closed_pending:
+        return
+    _closed_pending = False
+    if len(_closed):
+        gc.collect()

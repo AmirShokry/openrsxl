@@ -985,18 +985,17 @@ impl CellStore {
                 o
             }
         };
-        let vals = unsafe {
-            [
-                self.ws.clone_ref(py).into_ptr(),
-                style_copy.into_ptr(),
-                row_obj.into_ptr(),
-                ffi::PyLong_FromLongLong(col),
-                value.into_ptr(),
-                none.clone_ref(py).into_ptr(),
-                dtype.into_ptr(),
-                none.into_ptr(),
-            ]
-        };
+        let col_obj = col.into_pyobject(py)?.into_any();
+        let vals = [
+            self.ws.clone_ref(py).into_ptr(),
+            style_copy.into_ptr(),
+            row_obj.into_ptr(),
+            col_obj.into_ptr(),
+            value.into_ptr(),
+            none.clone_ref(py).into_ptr(),
+            dtype.into_ptr(),
+            none.into_ptr(),
+        ];
         let cell = self.slots.as_ref().unwrap().create(py, &vals)?.unbind();
         if e.kind == K_PYVAL {
             self.free_obj(e.payload);

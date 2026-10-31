@@ -19,7 +19,8 @@
   streaming (read-only mode) access to formulas *and* their cached values,
   comments, hyperlinks, merged cells, dimensions, sheet properties, data
   validation, conditional formatting, tables and full mode's cells at empty
-  positions - each behind its own flag.
+  positions - each behind its own flag; and `openrsxl.extended.llm`,
+  lossless compression of workbooks into compact text for language models.
 
 ## Installation
 
@@ -267,6 +268,97 @@ linked cells, as in full mode).
 
 [`examples/extended_streaming.py`](https://github.com/AmirShokry/openrsxl/blob/main/examples/extended_streaming.py) is a
 runnable tour of every flag.
+
+### Freeing memory
+
+`wb.close()` behaves as in openpyxl: a read-only workbook closes its file
+(openrsxl also drops its shared strings at once), a full-mode workbook stays
+usable - so its cells stay in memory while it is referenced. A workbook and
+its worksheets reference each other, so a dropped workbook waits for
+Python's cycle collector; openrsxl runs it before the next `load_workbook`
+when a closed workbook is still in memory. To return the memory of a
+workbook at once, in any mode:
+
+```python
+from openrsxl.extended import release
+
+release(wb)        # closes it, empties its cells, breaks the references; wb is unusable afterwards
+```
+
+## `openrsxl.extended.llm`: lossless compression for language models
+
+`compress_workbook` turns a workbook into a compact text document that a
+language model reads directly and that decodes back to exactly what
+openpyxl reads - values with their types, formulas, every cell's style,
+merged cells, hyperlinks, comments, dimensions, data validation,
+conditional formatting, tables, sheet and workbook settings - each in its
+own section, so you send a model only what it needs:
+
+```python
+from openrsxl.extended.llm import compress_sheets, compress_workbook, decompress
+
+doc = compress_workbook("book.xlsx")                       # all sections, in memory
+prompt = doc.text()                                        # the document (with a legend)
+compress_workbook("book.xlsx", include="values").text()    # values only
+compress_workbook("book.xlsx", include=["formulas", "styles"], output="all", path="out/book")
+                                                           # memory + out/book.llm.txt + .llm.json
+book = decompress("out/book.llm.json")                     # back to cells and openpyxl objects
+book["Sales"].cell("D2")                                   # value, formula, style, link, comment
+
+compress_workbook("book.xlsx", sheets="Sales")             # one worksheet (the others are not read)
+for name, doc in compress_sheets("book.xlsx"):             # one document per worksheet, workbook opened once
+    ...
+```
+
+```
+## styles
+...
+s1: font=f1 fill=p2
+## sheet 1 "Sales" dim=A1:E27
+### values hybrid start=A
+A2:A13=North
+A14:A25=South
+1:Region|Month|Units|Price|Revenue
+|2024-01-01|6|2.5
+|2024-02-01|9|2.5
+...
+### formulas
+E2:E25=C2*D2
+E27=SUM(E2:E25)
+### styles
+A1:E1=s1
+```
+
+* **Streamed by the Rust engine** - no cell objects, flat memory; written to
+  files as it goes (`large_sample.xlsx`, 98 MB, 10 M cells: 28 s, 212 MB peak).
+* **Measured per sheet** - density, distinct values, repetition, estimated
+  tokens - to pick the cheapest readable encoding: a CSV-like `grid`, the
+  `index` of SpreadsheetLLM (value -> ranges) for sparse or repetitive
+  sheets, or `hybrid` (repeated blocks + grid). Formula fills become one
+  line (`E2:E25=C2*D2`), periodic rows a strided range (`B6:Q98/4`).
+* **Small** - against the same information loaded uncompressed (cells as
+  JSON with their types, styles.xml, the metadata XML), the whole document
+  saves 97 % of the tokens on `sample.xlsx`, 93 % on `large_sample.xlsx`
+  and 84 % on generated financial workbooks; values alone 80-92 %, formulas
+  99.4-99.97 %, styles 94-99.9 % (`tools/llm_bench.py`). Ledgers stay
+  row-local: a value repeated down a column is `^`, and rows are labelled
+  only where the number cannot be inferred (and every 10th row).
+* **Lossless by default, focused on request** - `skip_hidden=True` leaves
+  out hidden rows and columns, `skip_hidden_sheets=True` hidden sheets,
+  `print_area_only=True` everything outside the print area (and print
+  titles), `rows="1:100,200:300"` / `columns="A:D,F"` /
+  `ranges=["A1:D20", "F5:H9"]` keep only those segments (per sheet with a dict); a filtered sheet is
+  marked as such in the document.
+* **Cheapest form by default** - the text document (`doc.text()`,
+  `output="text"`). JSON is opt-in (`output="json"`, `doc.to_json()`) for
+  programs: the same content costs 1-2 % more tokens on large workbooks and
+  about 50 % more on small ones.
+* **Self-describing** - every document starts with a legend explaining the
+  encodings it uses; the format is specified in
+  [`docs/LLM_ENCODING.md`](https://github.com/AmirShokry/openrsxl/blob/main/docs/LLM_ENCODING.md).
+
+[`examples/llm_compression.py`](https://github.com/AmirShokry/openrsxl/blob/main/examples/llm_compression.py)
+is a runnable tour.
 
 ## Performance
 

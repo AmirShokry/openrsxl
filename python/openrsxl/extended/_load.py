@@ -8,9 +8,12 @@ from ._streaming import FLAGS, ReadOnlyWorksheet, _Options
 
 class _ExtendedReader(ExcelReader):
 
-    def __init__(self, *args, options=None, **kw):
+    def __init__(self, *args, options=None, only=None, **kw):
         super().__init__(*args, **kw)
         self._ext = options
+        # names of the sheets that get the features (None: all); the others
+        # are plain read-only worksheets, their XML is not scanned at load
+        self._only = only
 
     def read_worksheets(self):
         if not self.read_only:
@@ -25,7 +28,8 @@ class _ExtendedReader(ExcelReader):
             rels = RelationshipList()
             if rels_path in self.valid_files:
                 rels = get_dependents(self.archive, rels_path)
-            ws = ReadOnlyWorksheet(self.wb, sheet.name, rel.target, self.shared_strings, self._ext)
+            options = self._ext if self._only is None or sheet.name in self._only else _Options()
+            ws = ReadOnlyWorksheet(self.wb, sheet.name, rel.target, self.shared_strings, options)
             ws.sheet_state = sheet.state
             self.wb._sheets.append(ws)
             ws._ext_bind(self.archive, rels)
@@ -138,3 +142,18 @@ def load_workbook(
 
 
 open = load_workbook
+
+
+def _load_for(filename, sheets, keep_links=True, **flags):
+    """Read-only workbook with the features `flags` bound only on the sheets
+    named in `sheets` (None: all) - for openrsxl.extended.llm, which reads
+    the metadata of the sheets it compresses only"""
+    options = _Options(**flags)
+    only = None if sheets is None else set([sheets] if isinstance(sheets, str) else sheets)
+    if not any(getattr(options, k) for k in FLAGS):
+        # exactly openpyxl, as load_workbook
+        reader = ExcelReader(filename, True, KEEP_VBA, False, keep_links, False)
+    else:
+        reader = _ExtendedReader(filename, True, KEEP_VBA, False, keep_links, False, options=options, only=only)
+    reader.read()
+    return reader.wb

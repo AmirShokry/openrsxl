@@ -16,7 +16,10 @@ run. Checks (all by default):
   the saved package (byte for byte);
 * ``ext``, ``ext_data_only``: openrsxl.extended streaming with every flag
   against openpyxl's full mode (tests/oracle/extended.py);
-* ``ext_subset``: a random (per file, reproducible) subset of the flags.
+* ``ext_subset``: a random (per file, reproducible) subset of the flags;
+* ``llm``: openrsxl.extended.llm - the decoded document against openpyxl
+  (tests/oracle/llm.py: values, formulas, styles, metadata, output forms,
+  and the filters skip_hidden / skip_hidden_sheets / print_area_only).
 
 The XML backend follows ``OPENPYXL_LXML`` as usual; ``OPENRSXL_PURE_PYTHON=1``
 checks the Python fallbacks. Exit status 1 if any file differs.
@@ -46,6 +49,7 @@ ALL_CHECKS = (
     "ext",
     "ext_data_only",
     "ext_subset",
+    "llm",
 )
 
 
@@ -85,6 +89,7 @@ def check_one(path, checks):
     sys.path.insert(0, os.path.join(ROOT, "tests"))
     from oracle.compare import compare_workbooks
     from oracle.extended import compare_extended
+    from oracle.llm import compare_llm
 
     area = streamed_area(path) if STREAMED & set(checks) else 0
 
@@ -98,6 +103,7 @@ def check_one(path, checks):
         "no_links": lambda: compare_workbooks(path, keep_links=False),
         "ext": lambda: compare_extended(path),
         "ext_data_only": lambda: compare_extended(path, data_only=True),
+        "llm": lambda: compare_llm(path),
     }
 
     def subset():
@@ -189,7 +195,7 @@ def run_file(path, checks, timeout):
                 _kill_tree(proc)
                 return {"file": path, "status": "timeout", "time": timeout}
     p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
-    res = {"file": path, "time": round(time.perf_counter() - t, 2)}
+    res = {"file": path, "time": round(time.perf_counter() - t, 2), "peak_mb": round(peak)}
     lines = p.stdout.decode("utf-8", "replace").strip().splitlines()
     if p.returncode != 0 or not lines:
         res.update(status="crash", returncode=p.returncode, stderr=p.stderr.decode("utf-8", "replace")[-3000:])

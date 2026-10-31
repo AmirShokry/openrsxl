@@ -29,6 +29,17 @@ Additions:
     openpyxl's ``load_workbook``. See ``help(load_workbook)``, the
     README and docs/COMPATIBILITY.md (limitations).
 
+``openrsxl.extended.llm``
+    lossless, LLM readable compression of workbooks: ``compress_workbook``
+    (separable sections - values, formulas, styles, metadata - to memory,
+    text or JSON files, each sheet's encoding chosen by measuring it),
+    ``decompress``, ``analyze_workbook``. See ``help(openrsxl.extended.llm)``
+    and docs/LLM_ENCODING.md.
+
+``release(wb)``
+    free the memory of a workbook at once (``close()`` keeps openpyxl's
+    meaning: a full-mode workbook stays usable, so its cells stay in memory).
+
 ``install_as_openpyxl()``
     make ``import openpyxl`` (in this process, also inside other libraries)
     import openrsxl, so that code written for openpyxl - including its
@@ -172,3 +183,35 @@ def __dir__():
 
 # -- extended features -------------------------------------------------------
 from ._load import load_workbook, open  # noqa: E402,F401,F811
+
+
+def release(wb):
+    """
+    Free the memory of a workbook now, in every mode, and leave it unusable.
+
+    ``wb.close()`` keeps openpyxl's meaning: a full-mode workbook stays
+    usable after it, so its cells stay in memory; a read-only one drops its
+    shared strings. A workbook and its worksheets reference each other, so
+    once dropped the rest waits for Python's cycle collector.
+    ``release(wb)`` closes the workbook, empties the cell stores and breaks
+    those references: the memory is returned at once (whatever other
+    references to the workbook, its worksheets or cells remain, they no
+    longer hold it). Any use of the workbook or its worksheets afterwards
+    fails. Returns None.
+    """
+    wb.close()
+    sheets = list(getattr(wb, "_sheets", ()))
+    for ws in sheets:
+        cells = getattr(ws, "_cells", None)
+        if cells is not None and hasattr(cells, "clear"):
+            cells.clear()
+        d = getattr(ws, "__dict__", None)
+        if d is not None:
+            d.clear()
+    archive = getattr(wb, "vba_archive", None)
+    if archive is not None:
+        try:
+            archive.close()
+        except Exception:  # pragma: no cover - already closed
+            pass
+    wb.__dict__.clear()

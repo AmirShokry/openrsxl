@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+* `openrsxl.extended.llm`: lossless, LLM readable compression of workbooks.
+  `compress_workbook(path, include=..., output=...)` streams every
+  worksheet through the Rust engine and writes a text document with
+  separable sections - values, formulas, styles, merged cells, hyperlinks,
+  comments, dimensions, data validation, conditional formatting, tables,
+  sheet and workbook settings, analysis - to memory, a `.llm.txt` and / or a
+  `.llm.json` file. Each sheet is measured first (density, distinct values,
+  repetition, estimated tokens) to choose its values encoding: `grid`
+  (CSV-like rows), `index` (value -> ranges) or `hybrid`; formula fills are
+  one line, periodic rows strided ranges. `decompress` reads a document back
+  into cells and openpyxl objects (`to_workbook()` rebuilds a Workbook),
+  `analyze_workbook` returns the measurements. Format and decoding guide:
+  `docs/LLM_ENCODING.md`; the legend at the top of every document explains
+  the encodings it uses. Grid rows are labelled only where the row number
+  cannot be inferred (plus every 10th row, `row_anchor=`), values repeated
+  down a column are `^` (`ditto=`), the style table is written once per
+  workbook (`## styles`). `tools/llm_bench.py` measures tokens against the
+  same information loaded uncompressed; `tools/make_financial_files.py`
+  generates financial workbooks for tests and benchmarks. Opt-in filters
+  spend no tokens on what is not shown: `skip_hidden=True` (cells of hidden
+  rows and columns), `skip_hidden_sheets=True`, `print_area_only=True` (the
+  print area and print titles); a filtered sheet says so in its header
+  (`skip=hidden`, `area=...`). One sheet at a time: `sheets="Name"`
+  / `sheets=[...]` compress only those worksheets (the others are not read,
+  their metadata included), `compress_sheets(path)` yields one complete
+  document per worksheet with the workbook opened once; `## sheet N` is the
+  sheet's position in the workbook. The text form is the default and the
+  cheapest output (JSON: 1-2 % more tokens on large workbooks). The
+  `openrsxl` namespace is unchanged.
+* `compress_workbook(..., rows=, columns=, ranges=)` (also
+  `compress_sheets`, `analyze_workbook`): compress only these rows /
+  columns / ranges, several segments each (`rows="1:100,200:300"`,
+  `columns="A:D,F"`, `ranges="A1:D20,F5:H9"`), the same for every sheet or
+  per sheet (`{sheet name: value}`); combined with the other filters; the
+  sheet header says what was selected (`rows=`, `cols=`, `cells=`).
+* Memory: `close()` of a read-only workbook drops its shared strings at
+  once; the default sheet `load_workbook` discards no longer keeps the
+  workbook in a reference cycle; a workbook closed and dropped is collected
+  before the next `load_workbook` (openrsxl creates few Python objects, so
+  Python's cycle collector could wait long). `openrsxl.extended.release(wb)`
+  frees a workbook at once in any mode. `close()` keeps openpyxl's
+  behaviour (a full-mode workbook stays usable); tests/test_memory.py
+  compares every behaviour around `close()` with openpyxl. Rust: references
+  could leak when building a read-only cell failed.
+* Dependencies: pyo3 0.30.1; GitHub Actions setup-python 7.1.0, setup-uv
+  10.3.3, upload-artifact 7.0.2, download-artifact 8.0.2, rust-cache 2.9.3,
+  gh-action-pypi-publish 1.14.3; pre-commit ruff 0.17.3, black 26.10.1,
+  pyupgrade 3.22.0, mypy 2.4.1.
+
 ## 0.2.2
 
 * `openrsxl.extended.load_workbook(..., read_all=True)`: every streaming

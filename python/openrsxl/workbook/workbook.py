@@ -420,6 +420,8 @@ class Workbook:
         """
         if hasattr(self, '_archive'):
             self._archive.close()
+        from openrsxl._native import workbook_closed
+        workbook_closed(self)
 
 
     def _duplicate_name(self, name):

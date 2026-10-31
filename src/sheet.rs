@@ -265,6 +265,8 @@ pub struct CellRec {
     pub formula: Option<Val>,
     /// formula_and_value: the cached value when it is not the primary value
     pub cached: Option<Val>,
+    /// the cached value is an error (data_type 'e' with data_only=True)
+    pub cached_error: bool,
     /// the primary value is the formula (data_only=False, formula cell)
     pub formula_primary: bool,
 }
@@ -859,8 +861,13 @@ impl<S: Source> SheetParser<S> {
         } else {
             None
         };
+        let mut cached_error = false;
         let (val, dtype, formula, cached) = if primary_formula {
-            (fval.unwrap(), DType::Code(DT_F), None, vres.map(|x| x.0))
+            let cached = vres.map(|(v, d)| {
+                cached_error = matches!(d, DType::Code(DT_E));
+                v
+            });
+            (fval.unwrap(), DType::Code(DT_F), None, cached)
         } else {
             let (v, d) = vres.unwrap();
             (v, d, fval, None)
@@ -873,6 +880,7 @@ impl<S: Source> SheetParser<S> {
             style_id,
             formula,
             cached,
+            cached_error,
             formula_primary: primary_formula,
         })
     }

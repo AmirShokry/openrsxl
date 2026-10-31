@@ -8,6 +8,9 @@ python/openrsxl/        Python package (openpyxl's object model, ported)
   worksheet/_cellstore.py  dict-compatible CellStore (Python side)
   extended/             openrsxl.extended (streaming features: _streaming.py,
                         load_workbook: _load.py)
+  extended/llm/         LLM compression: _encode.py (sections, outputs),
+                        _decode.py (reference reader), _cx.py (compact XML),
+                        _legend.py, _model.py, _rebuild.py (to_workbook)
 src/                    Rust engine (pyo3 extension openrsxl._openrsxl)
   xml.rs                strict streaming XML tokenizer (expat semantics)
   sheet.rs              worksheet reader (WorkSheetParser.parse_cell & co)
@@ -18,11 +21,15 @@ src/                    Rust engine (pyo3 extension openrsxl._openrsxl)
   dates.rs              from_excel / to_excel
   prescan.rs            extended: sheet parts outside <sheetData>, row
                         attributes, corner cell styles (cell data skipped)
+  llm.rs                extended.llm: streaming sheet encoder (analysis,
+                        grid / index / hybrid values, formula fills, style
+                        map; docs/LLM_ENCODING.md)
   writer.rs             <sheetData> serialiser (lxml and ElementTree output)
 tests/
   upstream/             openpyxl's own test-suite (ported, run from there)
   oracle/compare.py     whole-workbook differential comparison
   oracle/extended.py    openrsxl.extended streaming vs openpyxl full mode
+  oracle/llm.py         openrsxl.extended.llm documents vs openpyxl
   smoke/                dependency-free smoke test (Pyodide CI job)
   test_*.py             differential, API surface, security and fuzz tests
 examples/               runnable documentation (tested by test_examples.py)
@@ -46,6 +53,8 @@ cd tests/upstream && pytest                # openpyxl's own suite
 OPENRSXL_FUZZ_EXAMPLES=3000 pytest tests/test_fuzz.py tests/test_cellstore.py tests/test_api_fuzz.py
 python tests/oracle/compare.py some.xlsx [--read-only|--data-only|--rich-text]
 python tests/oracle/extended.py some.xlsx [--data-only]   # extended streaming
+python tests/oracle/llm.py some.xlsx [--no-full] [--per-sheet]   # extended.llm
+python tools/llm_bench.py some.xlsx       # tokens vs CSV / Markdown / JSON (tiktoken)
 python tools/digest.py <lib> f.xlsx <dir> [--read-only] [--data-only]   # huge files
 tools/verify_files.sh <workdir> big1.xlsx big2.xlsx                   # memory friendly
 ```
@@ -70,7 +79,20 @@ reference behaviour).
   and pandas running on openrsxl (`install_as_openpyxl`).
 * `test_fuzz.py` - hypothesis-driven XML / number / formula fuzzing.
 * `test_extended.py` - openrsxl.extended against openpyxl's full mode.
+* `test_llm.py` - openrsxl.extended.llm: token / formula-fill properties
+  (hypothesis), every encoding on synthetic workbooks and raw XML edge
+  cases, the Python fallbacks, sections, outputs, the opt-in filters
+  (`skip_hidden`, `skip_hidden_sheets`, `print_area_only`: the filtered
+  document must equal the lossless one restricted to the cells openpyxl
+  says are visible / printed), `to_workbook` and
+  openpyxl's own test files, all decoded and compared with openpyxl
+  (`tests/oracle/llm.py`; `tools/corpus.py --checks llm` for corpora,
+  `OPENRSXL_LLM_FILES="a.xlsx;b.xlsx" pytest tests/test_llm.py` for
+  private files).
 * `test_api_surface.py` - every public name and signature of openpyxl.
+* `test_memory.py` - memory of closed / dropped workbooks with the cycle
+  collector off (weak references, no RSS noise), `extended.release`, and
+  every observable behaviour around `close()` compared with openpyxl.
 
 ### Corpus runs
 

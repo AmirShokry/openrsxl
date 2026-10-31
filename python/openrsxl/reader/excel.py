@@ -120,6 +120,8 @@ class ExcelReader:
 
     def __init__(self, fn, read_only=False, keep_vba=KEEP_VBA,
                  data_only=False, keep_links=True, rich_text=False):
+        from openrsxl._native import collect_closed
+        collect_closed()
         self.archive = _validate_archive(fn)
         self.valid_files = self.archive.namelist()
         self.read_only = read_only
@@ -152,6 +154,11 @@ class ExcelReader:
         self.parser = WorkbookParser(self.archive, wb_part.PartName[1:], keep_links=self.keep_links)
         self.parser.parse()
         wb = self.parser.wb
+        # the default sheet of Workbook() is replaced: unreachable, but in
+        # reference cycles that hold the workbook until the cycle collector
+        # runs - break them now
+        for default in wb._sheets:
+            default.__dict__.clear()
         wb._sheets = []
         wb._data_only = self.data_only
         wb._read_only = self.read_only

@@ -12,6 +12,7 @@ use pyo3::{create_exception, ffi};
 mod dates;
 mod formula;
 mod ftemplate;
+mod llm;
 mod prescan;
 mod pysource;
 mod sheet;
@@ -333,39 +334,46 @@ impl RowReader {
                             o
                         }
                     };
-                    let mut vals: Vec<*mut ffi::PyObject> = Vec::with_capacity(8 + extra.len());
-                    unsafe {
-                        vals.push(ws.clone().into_ptr());
-                        vals.push(row_obj.into_ptr());
-                        vals.push(ffi::PyLong_FromLongLong(c.column));
-                        if dual {
-                            // formula: the data_only=False value of formula cells
-                            let formula = if c.formula_primary {
-                                value.clone_ref(py)
-                            } else {
-                                match c.formula {
-                                    Some(f) => self.parser.val_to_py(py, f)?,
-                                    None => py.None(),
-                                }
-                            };
-                            // cached_value: the data_only=True value
-                            let cached = match c.cached {
-                                Some(v) => self.parser.val_to_py(py, v)?,
-                                None => value.clone_ref(py),
-                            };
-                            vals.push(value.into_ptr());
-                            vals.push(dtype.into_ptr());
-                            vals.push(style_obj(py, &c.style_id).into_ptr());
-                            vals.push(formula.into_ptr());
-                            vals.push(cached.into_ptr());
+                    // every conversion that can fail happens before the
+                    // references are handed to raw pointers (an early return
+                    // would leak them)
+                    let dual_objs = if dual {
+                        // formula: the data_only=False value of formula cells
+                        let formula = if c.formula_primary {
+                            value.clone_ref(py)
                         } else {
-                            vals.push(value.into_ptr());
-                            vals.push(dtype.into_ptr());
-                            vals.push(style_obj(py, &c.style_id).into_ptr());
-                        }
-                        for _ in &extra {
-                            vals.push(py.None().into_ptr());
-                        }
+                            match c.formula {
+                                Some(f) => self.parser.val_to_py(py, f)?,
+                                None => py.None(),
+                            }
+                        };
+                        // cached_value: the data_only=True value
+                        let cached = match c.cached {
+                            Some(v) => self.parser.val_to_py(py, v)?,
+                            None => value.clone_ref(py),
+                        };
+                        Some((formula, cached))
+                    } else {
+                        None
+                    };
+                    let column = c.column.into_pyobject(py)?.into_any();
+                    let mut vals: Vec<*mut ffi::PyObject> = Vec::with_capacity(8 + extra.len());
+                    vals.push(ws.clone().into_ptr());
+                    vals.push(row_obj.into_ptr());
+                    vals.push(column.into_ptr());
+                    if let Some((formula, cached)) = dual_objs {
+                        vals.push(value.into_ptr());
+                        vals.push(dtype.into_ptr());
+                        vals.push(style_obj(py, &c.style_id).into_ptr());
+                        vals.push(formula.into_ptr());
+                        vals.push(cached.into_ptr());
+                    } else {
+                        vals.push(value.into_ptr());
+                        vals.push(dtype.into_ptr());
+                        vals.push(style_obj(py, &c.style_id).into_ptr());
+                    }
+                    for _ in &extra {
+                        vals.push(py.None().into_ptr());
                     }
                     items[i] = slots.create(py, &vals)?.unbind();
                 }
@@ -426,5 +434,6 @@ fn _openrsxl(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RowReader>()?;
     m.add_class::<store::CellStore>()?;
     writer::register(m)?;
+    llm::register(m)?;
     Ok(())
 }

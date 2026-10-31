@@ -58,6 +58,13 @@ impl SlotClass {
     ) -> PyResult<Bound<'py, PyAny>> {
         debug_assert_eq!(values.len(), self.offsets.len());
         unsafe {
+            if values.iter().any(|v| v.is_null()) {
+                // a failed constructor (its error is set): release the others
+                for v in values {
+                    ffi::Py_XDECREF(*v);
+                }
+                return Err(PyErr::fetch(py));
+            }
             let tp = self.tp.as_ptr() as *mut ffi::PyTypeObject;
             let alloc = (*tp).tp_alloc.unwrap_or(ffi::PyType_GenericAlloc);
             let obj = alloc(tp, 0);
