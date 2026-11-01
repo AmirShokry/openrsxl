@@ -293,6 +293,26 @@ def compare_extended(src, data_only=False, flags=None, rsxl=None, oracle=None, l
         if missing:
             diff(f"{name}: cells not produced by iter_rows: {missing[:10]} ({len(missing)})")
 
+        if flags.get("exact_dimensions"):
+            keys = list(pcells)
+            if keys:
+                exp_b = (
+                    min(k[0] for k in keys),
+                    min(k[1] for k in keys),
+                    max(k[0] for k in keys),
+                    max(k[1] for k in keys),
+                )
+            else:
+                exp_b = (1, 1, 1, 1)
+            got_b = (ews.min_row, ews.min_column, ews.max_row, ews.max_column)
+            if got_b != exp_b:
+                diff(f"{name}: bounds {got_b} != {exp_b}")
+            if not keys and list(ews.iter_rows()):
+                diff(f"{name}: iter_rows() of a sheet without cells")
+        if flags.get("random_access"):
+            if _check_random_access(name, ews, pws, pcells, fcells, vcells, flags, diff):
+                return diffs
+
         # worksheet attributes
         pstate = sheet_state(pws)
         if flags.get("read_merged_cells"):
@@ -347,6 +367,101 @@ def compare_extended(src, data_only=False, flags=None, rsxl=None, oracle=None, l
             if got != pstate["tables"]:
                 diff(f"{name}: tables")
     return diffs
+
+
+def _rows_sig(ws, flags):
+    out = []
+    for values_only in (False, True):
+        for row in ws.iter_rows(values_only=values_only):
+            if values_only:
+                out.append(tuple(norm(v) for v in row))
+            else:
+                out.append(tuple(_sig(c, flags) for c in row))
+    return out
+
+
+def _sig(c, flags):
+    if type(c).__name__ == "EmptyCell":
+        return "EmptyCell"
+    return (getattr(c, "row", None), getattr(c, "column", None), str(actual_cell(c, flags)))
+
+
+def _check_random_access(name, ews, pws, pcells, fcells, vcells, flags, diff):
+    """
+    random_access: ws.cell() / ws[...] / ws._cells against full mode's cells
+    (positions without a cell: the cell full mode creates, or EmptyCell
+    without create_empty_cells); iter_rows unchanged by the store.
+    Returns True when the limit of differences is reached.
+    """
+    from openpyxl.cell.cell import Cell
+
+    before = _rows_sig(ews, flags)
+
+    def expected(k):
+        exp = pcells.get(k)
+        if exp is None:
+            if not flags.get("create_empty_cells"):
+                return "EmptyCell"
+            exp = Cell(pws, row=k[0], column=k[1])
+            return str(expected_cell(exp, exp, exp, flags))
+        return str(expected_cell(exp, fcells.get(k), vcells.get(k), flags))
+
+    def got(c, k):
+        if type(c).__name__ == "EmptyCell":
+            return "EmptyCell"
+        if (c.row, c.column) != k:
+            return f"at {(c.row, c.column)}"
+        return str(actual_cell(c, flags))
+
+    # ws._cells: the cells full mode keeps (at valid positions)
+    exp_keys = sorted(k for k in pcells if k[0] >= 1 and k[1] >= 1)
+    got_keys = sorted(ews._cells)
+    if got_keys != exp_keys:
+        if diff(f"{name}: _cells keys {got_keys[:10]} != {exp_keys[:10]} ({len(got_keys)} / {len(exp_keys)})"):
+            return True
+    if len(ews._cells) != len(got_keys) or bool(ews._cells) != bool(got_keys):
+        if diff(f"{name}: _cells len / bool"):
+            return True
+    for k in exp_keys:
+        if k in ews._cells and got(ews._cells.get(k), k) != expected(k):
+            if diff(f"{name}: _cells[{k}]\n  exp {expected(k)}\n  got {got(ews._cells[k], k)}"):
+                return True
+    # every position of the sheet and beyond
+    max_r = min(max([k[0] for k in exp_keys] + [ews.max_row or 1]) + 2, 80)
+    max_c = min(max([k[1] for k in exp_keys] + [ews.max_column or 1]) + 2, 40)
+    for r in range(1, max_r + 1):
+        for c in range(1, max_c + 1):
+            a, e = got(ews.cell(r, c), (r, c)), expected((r, c))
+            if a != e:
+                if diff(f"{name}: cell({r}, {c})\n  exp {e}\n  got {a}"):
+                    return True
+    if ews.cell(1, 1) is not ews.cell(1, 1) and (1, 1) in pcells:
+        diff(f"{name}: cell(1, 1) is not the same object")
+    # ranges, rows, columns: every position (full mode)
+    from openpyxl.utils import get_column_letter
+
+    last = get_column_letter(max_c)
+    rect = ews[f"A1:{last}{max_r}"]
+    if [[got(c, (r, k)) for k, c in enumerate(row, 1)] for r, row in enumerate(rect, 1)] != [
+        [expected((r, k)) for k in range(1, max_c + 1)] for r in range(1, max_r + 1)
+    ]:
+        diff(f"{name}: ws['A1:{last}{max_r}']")
+    if ews["A1"] is not ews.cell(1, 1) and (1, 1) in pcells:
+        diff(f"{name}: ws['A1'] is not ws.cell(1, 1)")
+    # (unsized sheet: the bounds of the cells, as full mode)
+    nrows = ews.max_row or max([k[0] for k in exp_keys], default=1)
+    ncols = ews.max_column or max([k[1] for k in exp_keys], default=1)
+    col = ews["B"]
+    if [got(c, (r, 2)) for r, c in enumerate(col, 1)] != [expected((r, 2)) for r in range(1, nrows + 1)]:
+        diff(f"{name}: ws['B']")
+    row2 = ews[2]
+    if [got(c, (2, k)) for k, c in enumerate(row2, 1)] != [expected((2, k)) for k in range(1, ncols + 1)]:
+        diff(f"{name}: ws[2]")
+    after = _rows_sig(ews, flags)
+    if after != before:
+        n = next((i for i, (x, y) in enumerate(zip(after, before)) if x != y), min(len(after), len(before)))
+        diff(f"{name}: iter_rows changed by the store at row {n}: {after[n:n + 1]} != {before[n:n + 1]}")
+    return False
 
 
 def _deferred(oracle, ext, src, data_only, diff, flags=ALL_FLAGS, full_err=None):

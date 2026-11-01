@@ -171,6 +171,37 @@ choices:
   the sheet's `<dimension>` element; file cells outside it are not produced.
   Cells *created* by a feature (merged cells, linked or commented empty cells,
   as full mode creates them) extend `max_row` / `max_column` when needed.
+  `exact_dimensions=True` computes the bounds as full mode does instead: from
+  every `<c>` element of the file (also one with a style only; empty
+  `<row>` elements do not count) and the cells the enabled features create;
+  a sheet without any has bounds 1 and `iter_rows()` without arguments
+  yields nothing, as full mode. Features that are not enabled do not count
+  (full mode always binds merged cells, hyperlinks and comments).
+* **Random access** (`random_access=True`). The first `ws.cell()` /
+  `ws[...]` of a sheet streams it once into a store {row: {column: cell}}
+  of the cells `iter_rows` yields (memory: the cell objects, as full mode
+  keeps them); later random accesses and `iter_rows` are lookups returning
+  the same objects (`ws.cell(1, 1) is ws["A1"]`). `ws[range]`, `ws[5]` and
+  `ws["B"]` hold every position of the range, as in full mode, while
+  `iter_rows` keeps read-only mode's rows (no rows after the last row of the
+  file), with or without the store; a sheet without `<dimension>` takes the
+  bounds of its cells for `ws["B"]` / `iter_cols`. `ws._cells` is a
+  read-only `Mapping` (not a `dict`) of the cells full mode keeps, in row
+  order (full mode: file cells first, then those created by merged ranges,
+  hyperlinks and comments). Positions are never created: full mode's
+  `cell()` / `iter_rows()` add cells to `_cells` and can raise `max_row`;
+  streaming does not. `openrsxl.extended.release_cells(ws or wb)` frees the
+  store.
+* **close()** of a read-only workbook closes its file, so streaming fails
+  afterwards (`ValueError: Attempt to use ZIP archive that was already
+  closed`), as in openpyxl; with `reopen=True` the next use reopens the path
+  or file object the workbook was loaded from (the shared strings are kept
+  for that). A pass already running goes on in any case.
+* **Threads.** On a GIL build, several threads can iterate and access one
+  streaming workbook: every pass opens its own stream of the archive member,
+  and lazily built state (random access store, merged-cell styles,
+  `start_cell`, empty-cell classes, a reopened archive) is built once under
+  a lock (the style registry of the workbook gains each merged style once).
 * **Empty positions.** Read-only mode yields one shared `EmptyCell` - no
   `coordinate`, `row` or `column` - wherever the file has no cell, while
   full mode creates a `Cell` (default style) when such a position is
@@ -208,9 +239,14 @@ choices:
   (`rich_text=True` has the same effect as in openpyxl's read-only mode).
 * **Warnings.** Warnings of worksheet content (unsupported extensions,
   invalid dates, ...) are emitted while iterating, as in openpyxl's read-only
-  mode, not while loading. The "merged range but has a comment" warning of
+  mode, not while loading - but by the first complete pass of a sheet only
+  (openpyxl's read-only mode repeats them on every pass; full mode emits them
+  once per load). The "merged range but has a comment" warning of
   `read_comments` + `read_merged_cells` is emitted while loading, as in full
   mode.
+* **Invalid print titles.** A print titles defined name openpyxl cannot
+  parse (eg. `#N/A`) makes openpyxl's `load_workbook` fail (in every mode);
+  `skip_invalid_defined_names=True` skips it with a warning instead.
 * **Malformed cell data.** Full mode parses all cells at load time, so a
   worksheet whose `<sheetData>` is malformed fails in `load_workbook`. The
   streaming features read cell data while iterating, like openpyxl's

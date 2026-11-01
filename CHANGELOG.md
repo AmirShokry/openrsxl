@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased
+
+Streaming (`openrsxl.extended`, read-only) options to replace full mode
+without changing results or speed; none is part of `read_all`, all default
+to False:
+
+* `exact_dimensions=True`: `min_row` / `max_row` / `min_column` /
+  `max_column` - and so `iter_rows()` - from the cells present, as full mode
+  (every `<c>` element, also style-only cells, plus the cells the enabled
+  features create), instead of the `<dimension>` element; computed by the
+  load-time pre-scan (no cell objects). A sheet declaring `A1:XFC1023` with
+  cells up to `G166` is iterated as 166 x 7, not 1023 x 16383.
+* `random_access=True`: `ws.cell()` and `ws[...]` (cell, range, column,
+  row) no longer read the sheet again on every call: the first one builds a
+  store of the sheet's cells in one pass, later calls (and `iter_rows`) are
+  lookups returning the same objects; ranges, rows and columns hold every
+  position, as in full mode (`iter_cols` / `columns` too). `ws._cells` is a
+  read-only mapping of the cells full mode keeps. Every position of a
+  100k x 8 sheet: 1.5 s / +128 MB (openpyxl full mode: 8.3 s / +323 MB);
+  2,000 `ws.cell()` calls on a 528 x 20 sheet: 9 ms, building the store
+  included (before: ~16 ms per call).
+  `openrsxl.extended.release_cells(ws or wb)` frees the store.
+* `reopen=True`: a workbook closed with `close()` reopens its path or file
+  object when used again (full mode stays usable after `close()`).
+* `skip_invalid_defined_names=True` (any mode): a print titles defined name
+  openpyxl cannot parse (eg. `#N/A`) is skipped with a warning instead of
+  failing the load.
+* Threads: lazily built state of a streaming sheet (merged-cell styles,
+  `start_cell`, the random access store, empty-cell classes, a reopened
+  archive) is built once under a lock, so threads can share a workbook.
+* Warnings of a streaming sheet's data (eg. "Data Validation extension is
+  not supported") are reported by its first complete pass only, as full
+  mode reports them once per load (openpyxl's read-only mode, and openrsxl
+  without flags, repeat them on every pass).
+* Iterating or accessing a position never creates a cell (full mode's
+  `iter_rows(max_row=50)` raises `max_row`); documented.
+* `tools/corpus.py --checks ext_access`: every feature plus these options
+  against full mode. CI: a test of a failed `save()` was flaky on
+  free-threaded Python (openpyxl's own temporary file warning); openrsxl's
+  side is still checked strictly.
+* CI runs on release tags and pull requests only (no longer on every push
+  to main).
+
 ## 0.3.1
 
 * Performance (extended streaming): sheets with many merged cells,

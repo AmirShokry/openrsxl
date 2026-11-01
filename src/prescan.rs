@@ -7,7 +7,9 @@
 //! * optionally the attributes of `<row>` elements (row dimensions), with
 //!   the row numbering rules of `WorkSheetParser.parse_row`;
 //! * optionally the `s` attribute of a set of cells (corners of merged
-//!   ranges), with the coordinate rules of `WorkSheetParser.parse_cell`.
+//!   ranges), with the coordinate rules of `WorkSheetParser.parse_cell`;
+//! * optionally the bounds of the cells present (every `<c>` element, with
+//!   the same coordinate rules): the keys of full mode's `ws._cells`.
 //!
 //! `<sheetData>` is skipped with byte searches (no tokenizing): anything the
 //! raw scan cannot handle safely raises NativeFallback and the caller uses
@@ -129,15 +131,16 @@ fn parse_attrs(buf: &[u8], r: Range) -> Result<Vec<RawAttr>, XmlError> {
     Ok(out)
 }
 
-/// prescan_sheet(source, want_rows, corners, helpers) -> dict
+/// prescan_sheet(source, want_rows, corners, helpers, want_bounds=False) -> dict
 #[pyfunction]
-#[pyo3(signature = (source, want_rows, corners, helpers))]
+#[pyo3(signature = (source, want_rows, corners, helpers, want_bounds=false))]
 pub fn prescan_sheet(
     py: Python<'_>,
     source: Py<PyAny>,
     want_rows: bool,
     corners: Option<&Bound<'_, PyAny>>,
     helpers: &Bound<'_, PyDict>,
+    want_bounds: bool,
 ) -> PyResult<Py<PyDict>> {
     let row_index = helpers
         .get_item("row_index")?
@@ -149,7 +152,15 @@ pub fn prescan_sheet(
             wanted.insert(item?.extract::<(i64, i64)>()?);
         }
     }
-    let want_cells = !wanted.is_empty();
+    let want_cells = !wanted.is_empty() || want_bounds;
+    // (min_row, min_col, max_row, max_col) of the cells present
+    let mut bounds: Option<(i64, i64, i64, i64)> = None;
+    let mut extend = |row: i64, col: i64| {
+        bounds = Some(match bounds {
+            None => (row, col, row, col),
+            Some((a, b, c, d)) => (a.min(row), b.min(col), c.max(row), d.max(col)),
+        });
+    };
     let wanted_rows: HashSet<i64> = wanted.iter().map(|x| x.0).collect();
     let mut r = Reader::new(PyFileSource::new(source));
     let head = PyList::empty(py);
@@ -211,6 +222,9 @@ pub fn prescan_sheet(
                                             if let Some((rr, cc)) = fast_coordinate(&t[5..5 + e]) {
                                                 if !wanted_rows.contains(&rr) {
                                                     col_counter = cc;
+                                                    if want_bounds {
+                                                        extend(rr, cc);
+                                                    }
                                                     return Ok(());
                                                 }
                                             }
@@ -301,6 +315,9 @@ pub fn prescan_sheet(
                                             (row_counter, col_counter)
                                         }
                                     };
+                                    if want_bounds {
+                                        extend(row, col);
+                                    }
                                     if wanted.contains(&(row, col)) {
                                         found.insert((row, col), s_attr.map(|s| s.to_string()));
                                     }
@@ -346,5 +363,6 @@ pub fn prescan_sheet(
         corners_out.set_item((row, col), s)?;
     }
     out.set_item("corners", corners_out)?;
+    out.set_item("bounds", bounds)?;
     Ok(out.unbind())
 }

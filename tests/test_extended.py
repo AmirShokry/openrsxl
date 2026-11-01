@@ -3,6 +3,7 @@ openrsxl.extended streaming features against the oracle (openpyxl's full
 mode), on synthetic workbooks covering each feature and its edge cases.
 """
 
+import collections.abc
 import io
 import itertools
 import zipfile
@@ -11,6 +12,7 @@ import openpyxl
 import pytest
 from fixtures import DEFAULT_STYLES, MAIN, make_xlsx, sheet_xml
 from openpyxl.utils import get_column_letter
+from oracle.compare import norm
 from oracle.extended import ALL_FLAGS, compare_extended
 
 import openrsxl
@@ -799,3 +801,296 @@ def test_hyperlink_relationships(rels):
     data = add_files(raw(CELLS, after=links, rels=False), dict([_rels(*rels)]))
     assert compare_extended(data, flags={"read_hyperlinks": True}) == []
     assert compare_extended(data) == []
+
+
+# -- access options: exact_dimensions, random_access, reopen ------------------
+
+ACCESS = dict(exact_dimensions=True, random_access=True)
+ACCESS_FLAGS = {
+    "all": dict(ALL_FLAGS, **ACCESS),
+    "none": dict(ACCESS),
+    "empty_cells": dict(ACCESS, create_empty_cells=True),
+    "merged_links": dict(ACCESS, read_merged_cells=True, read_hyperlinks=True),
+    # the <dimension>'s bounds: iter_rows stops at the last row as without store
+    "random_only": dict(random_access=True),
+    "random_merged": dict(random_access=True, read_merged_cells=True, create_empty_cells=True),
+}
+ACCESS_CASES = dict(
+    RAW_CASES,
+    rich=RICH,
+    many_merges=MANY_MERGES,
+    raw_merges=RAW_MERGES,
+    loose_dimension=raw(
+        CELLS + '<row r="9" ht="20" customHeight="1"/>',
+        before='<dimension ref="A1:H30"/>',
+        after='<mergeCells count="1"><mergeCell ref="F11:G12"/></mergeCells>',
+    ),
+)
+
+
+@pytest.mark.parametrize("data_only", [False, True])
+@pytest.mark.parametrize("flags", sorted(ACCESS_FLAGS))
+@pytest.mark.parametrize("case", sorted(ACCESS_CASES))
+def test_access_options(case, flags, data_only):
+    """bounds, ws.cell(), ws[...], ws._cells against full mode (oracle)"""
+    assert compare_extended(ACCESS_CASES[case], data_only=data_only, flags=ACCESS_FLAGS[flags]) == []
+
+
+@pytest.mark.parametrize("seed", range(0, 60, 3))
+def test_access_options_random_books(seed):
+    data = _random_book(seed)
+    for flags in ACCESS_FLAGS.values():
+        assert compare_extended(data, data_only=bool(seed % 2), flags=flags) == []
+
+
+# the bounds of the notes that motivated exact_dimensions: a <dimension>
+# larger than the cells (styled cells count, empty rows do not)
+LOOSE = raw(
+    '<row r="1"><c r="A1"><v>1</v></c><c r="G1" s="3"/></row><row r="166"><c r="B166" t="s"><v>0</v></c></row>'
+    '<row r="1000" ht="20" customHeight="1"/>',
+    before='<dimension ref="A1:XFC1023"/>',
+    rels=False,
+)
+
+
+def _bounds(ws):
+    return (ws.min_row, ws.min_column, ws.max_row, ws.max_column)
+
+
+def test_exact_dimensions_from_cells():
+    full = openpyxl.load_workbook(io.BytesIO(LOOSE)).active
+    plain = ext.load_workbook(io.BytesIO(LOOSE), read_only=True).active
+    ws = ext.load_workbook(io.BytesIO(LOOSE), read_only=True, exact_dimensions=True).active
+    assert (plain.max_row, plain.max_column) == (1023, 16383)
+    assert _bounds(ws) == _bounds(full) == (1, 1, 166, 7)
+    rows = list(ws.iter_rows(values_only=True))
+    assert len(rows) == 166 and {len(r) for r in rows} == {7}
+    assert rows[0] == (1, None, None, None, None, None, None) and rows[165][1] == "zero"
+    assert ws.calculate_dimension() == "A1:G166"
+
+
+def test_exact_dimensions_empty_sheet():
+    data = raw("", before='<dimension ref="A1:P1001"/>', rels=False)
+    full = openpyxl.load_workbook(io.BytesIO(data)).active
+    ws = ext.load_workbook(io.BytesIO(data), read_only=True, exact_dimensions=True).active
+    assert _bounds(ws) == _bounds(full) == (1, 1, 1, 1)
+    assert list(ws.iter_rows()) == list(full.iter_rows()) == []
+    assert list(ws.values) == []
+
+
+@pytest.mark.parametrize("case", ["plain", "cells_without_coordinates", "attr_syntax", "odd_coordinates"])
+def test_exact_dimensions_python_scan(case, monkeypatch):
+    """the pure Python pre-scan computes the same bounds"""
+    from openrsxl import _native
+
+    data = RAW_CASES[case]
+    native = ext.load_workbook(io.BytesIO(data), read_only=True, exact_dimensions=True).active
+    monkeypatch.setattr(_native, "ENABLED", False)
+    python = ext.load_workbook(io.BytesIO(data), read_only=True, exact_dimensions=True).active
+    assert _bounds(native) == _bounds(python)
+
+
+def _counting(ws, monkeypatch):
+    calls = []
+    real = ws._ext_base_rows
+
+    def counted(*a, **kw):
+        calls.append(a)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(ws, "_ext_base_rows", counted)
+    return calls
+
+
+def test_random_access_reads_the_sheet_once(monkeypatch):
+    ws = ext.load_workbook(io.BytesIO(RICH), read_only=True, random_access=True, read_merged_cells=True)["Main"]
+    calls = _counting(ws, monkeypatch)
+    first = ws.cell(2, 3)
+    for r in range(1, 40):
+        for c in range(1, 12):
+            ws.cell(r, c)
+    ws["A1:D20"], ws["B"], ws[5], ws["C7"]
+    list(ws.iter_rows(min_row=3, max_row=9, values_only=True))
+    assert len(calls) == 1
+    assert ws.cell(2, 3) is first is ws["C2"]
+    ext.release_cells(ws)
+    assert ws.cell(2, 3) is not first and len(calls) == 2
+    ext.release_cells(ws.parent)
+    assert "_ra" not in ws.__dict__
+
+
+def test_random_access_cells_view():
+    full = openpyxl.load_workbook(io.BytesIO(RICH))["Main"]
+    ws = ext.load_workbook(io.BytesIO(RICH), read_only=True, random_access=True, read_all=True)["Main"]
+    view = ws._cells
+    assert isinstance(view, collections.abc.Mapping) and not isinstance(view, dict)
+    assert set(view) == set(full._cells) and len(view) == len(full._cells) and bool(view)
+    assert view.get((1, 1)) is ws.cell(1, 1) and view[(1, 1)].value == full._cells[(1, 1)].value
+    assert view.get((5000, 1)) is None and (5000, 1) not in view and "A1" not in view
+    with pytest.raises(KeyError):
+        view[(5000, 1)]
+    with pytest.raises(TypeError):
+        view.get([1, 1])
+    assert max(r for r, _ in view) == full.max_row and max(c for _, c in view) == full.max_column
+    assert [k for k, _ in view.items()] == sorted(view)  # row order
+    with pytest.raises(TypeError):
+        view[(1, 1)] = None
+
+
+def test_access_options_off_is_read_only_mode():
+    plain = ext.load_workbook(io.BytesIO(RICH), read_only=True, read_all=True)["Main"]
+    ref = openpyxl.load_workbook(io.BytesIO(RICH), read_only=True)["Main"]
+    for name in ("_cells", "iter_cols", "columns"):
+        assert not hasattr(plain, name) and not hasattr(ref, name)
+    assert (plain.max_row, plain.max_column) == (ref.max_row, ref.max_column)
+
+
+@pytest.mark.parametrize("source", ["bytes", "path"])
+def test_reopen_after_close(source, tmp_path):
+    path = tmp_path / "book.xlsx"
+    path.write_bytes(RICH)
+
+    def src():
+        return io.BytesIO(RICH) if source == "bytes" else str(path)
+
+    def values(rows):
+        return [tuple(norm(v) for v in r) for r in rows]
+
+    expected = values(ext.load_workbook(src(), read_only=True)["Main"].values)
+    # without reopen: openpyxl's error
+    for lib in (openpyxl, ext):
+        wb = lib.load_workbook(src(), read_only=True)
+        wb.close()
+        with pytest.raises(ValueError, match="already closed"):
+            list(wb["Main"].values)
+    wb = ext.load_workbook(src(), read_only=True, reopen=True, random_access=True, read_merged_cells=True)
+    ws = wb["Main"]
+    rows = ws.iter_rows(values_only=True)
+    first = next(rows)
+    wb.close()
+    assert values([first, *rows]) == expected  # a pass started before close() goes on
+    assert values(ws.values) == expected  # a new pass reopens the file
+    wb.close()
+    assert norm(ws.cell(2, 2).value) == expected[1][1]  # (store built after a close)
+    wb.close()
+    assert values(ws.values) == expected and [str(r) for r in ws.merged_cells] != []
+    wb.close()
+    if source == "path":
+        assert wb._archive.fp is None
+        path.unlink()  # closed: the file can be removed on Windows too
+
+
+def _cell_state(c):
+    if type(c).__name__ == "EmptyCell":
+        return "EmptyCell"
+    sty = getattr(c, "style_array", None) or c._style
+    return (type(c).__name__, c.coordinate, norm(c.value), tuple(sty))
+
+
+def test_threads_share_a_streaming_workbook():
+    """iter_rows, random access and merged start cells from several threads
+    on one workbook: the results of a single thread"""
+    import sys
+    import threading
+
+    def results(wb):
+        ws = wb["Main"]
+        out = [tuple(str(_cell_state(c)) for c in row) for row in ws.iter_rows()]
+        out.append(tuple(str(_cell_state(ws.cell(r, c))) for r in range(1, 45) for c in range(1, 14)))
+        out.append(tuple(str(_cell_state(r.start_cell)) for r in ws.merged_cells))
+        return out
+
+    kw = dict(read_only=True, read_all=True, random_access=True, exact_dimensions=True)
+    single = ext.load_workbook(io.BytesIO(RICH), **kw)
+    expected = results(single)
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for _ in range(3):
+            wb = ext.load_workbook(io.BytesIO(RICH), **kw)
+            got, errors = [], []
+
+            def run():
+                try:
+                    got.append(results(wb))
+                except Exception as e:  # pragma: no cover - reported below
+                    errors.append(e)
+
+            threads = [threading.Thread(target=run) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            assert errors == [] and len(got) == 4
+            assert all(g == expected for g in got)
+            # merged styles registered once
+            assert len(wb._cell_styles) == len(single._cell_styles)
+    finally:
+        sys.setswitchinterval(old)
+
+
+EXT_WARNING = raw(
+    CELLS,
+    after='<extLst><ext uri="{CCE6A557-97BC-4b89-ADB6-D9C93CAAB3DF}">'
+    '<x14:dataValidations xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" count="0"/>'
+    "</ext></extLst>",
+    rels=False,
+)
+
+
+@pytest.mark.parametrize("flags", [dict(read_dimensions=True), dict(random_access=True), dict(create_empty_cells=True)])
+def test_sheet_warnings_once_per_sheet(flags):
+    import warnings
+
+    def messages(load, passes):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ws = load().active
+            for _ in range(passes):
+                list(ws.iter_rows())
+        return [str(x.message) for x in w if "extension is not supported" in str(x.message)]
+
+    full = messages(lambda: openpyxl.load_workbook(io.BytesIO(EXT_WARNING)), 0)
+    plain = messages(lambda: openpyxl.load_workbook(io.BytesIO(EXT_WARNING), read_only=True), 3)
+    got = messages(lambda: ext.load_workbook(io.BytesIO(EXT_WARNING), read_only=True, **flags), 3)
+    assert len(full) == 1 and len(plain) == 3  # (read-only mode: every pass)
+    assert got == full
+
+
+def _titles_book(titles):
+    return add_files(
+        make_xlsx(sheets=[CELLS]),
+        {
+            "xl/workbook.xml": f'<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="{MAIN}" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>'
+            f'<definedNames><definedName name="_xlnm.Print_Titles" localSheetId="0">{titles}</definedName>'
+            '<definedName name="_xlnm.Print_Area" localSheetId="0">Sheet1!$A$1:$B$2</definedName>'
+            '<definedName name="other" localSheetId="0">Sheet1!$A$1</definedName></definedNames></workbook>'
+        },
+    )
+
+
+INVALID_TITLES = _titles_book("#N/A")
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_skip_invalid_defined_names(read_only):
+    import warnings
+
+    with pytest.raises(Exception) as exp:
+        openpyxl.load_workbook(io.BytesIO(INVALID_TITLES), read_only=read_only)
+    with pytest.raises(type(exp.value)):
+        ext.load_workbook(io.BytesIO(INVALID_TITLES), read_only=read_only)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        wb = ext.load_workbook(io.BytesIO(INVALID_TITLES), read_only=read_only, skip_invalid_defined_names=True)
+    assert [str(x.message) for x in w] == ["Print titles cannot be set to Defined name: #N/A."]
+    ws = wb.active
+    # what openpyxl reads without the invalid definition
+    valid = _titles_book("Sheet1!$1:$1")
+    ref = openpyxl.load_workbook(io.BytesIO(valid), read_only=read_only).active
+    assert getattr(ws, "_print_rows", None) is None and getattr(ws, "_print_cols", None) is None
+    assert ref._print_rows is not None
+    assert str(ws._print_area) == str(ref._print_area) and list(ws.defined_names) == list(ref.defined_names)
+    assert next(ws.iter_rows(values_only=True))[:2] == ("zero", 1)

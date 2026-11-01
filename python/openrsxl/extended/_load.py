@@ -1,19 +1,29 @@
 """openrsxl.extended.load_workbook: openpyxl's load_workbook + opt-in features"""
 
+import types
+from warnings import warn
+
 from openrsxl.packaging.relationship import RelationshipList, get_dependents, get_rels_path
 from openrsxl.reader.excel import KEEP_VBA, ExcelReader
+from openrsxl.worksheet.print_settings import PrintArea, PrintTitles
 
 from ._streaming import FLAGS, ReadOnlyWorksheet, _Options
 
 
 class _ExtendedReader(ExcelReader):
 
-    def __init__(self, *args, options=None, only=None, **kw):
+    def __init__(self, *args, options=None, only=None, skip_invalid_defined_names=False, **kw):
         super().__init__(*args, **kw)
-        self._ext = options
+        self._ext = options or _Options()
         # names of the sheets that get the features (None: all); the others
         # are plain read-only worksheets, their XML is not scanned at load
         self._only = only
+        self._skip_names = skip_invalid_defined_names
+
+    def read_workbook(self):
+        super().read_workbook()
+        if self._skip_names:
+            self.parser.assign_names = types.MethodType(_assign_names, self.parser)
 
     def read_worksheets(self):
         if not self.read_only:
@@ -54,6 +64,10 @@ def load_workbook(
     read_conditional_formatting=None,
     read_tables=None,
     create_empty_cells=None,
+    exact_dimensions=False,
+    random_access=False,
+    reopen=False,
+    skip_invalid_defined_names=False,
 ):
     """Open the given filename and return the workbook
 
@@ -86,6 +100,30 @@ def load_workbook(
         features - instead of read-only mode's shared, coordinate-less
         ``EmptyCell``; created on the fly, nothing is kept
 
+    Options outside ``read_all`` (default False; read-only workbooks):
+
+    :param exact_dimensions: ``min_row``, ``max_row``, ``min_column``,
+        ``max_column`` - and so the rows and columns of ``iter_rows()`` -
+        from the cells present (every cell of the file, also one with a
+        style only, and the cells the enabled features create), as full
+        mode, instead of the sheet's ``<dimension>`` element; computed by
+        the pre-scan at load time
+    :param random_access: ``ws.cell()`` and ``ws[...]`` (cells, ranges,
+        columns, rows) without reading the sheet again on every call: the
+        first one builds a store of the sheet's cells (one streaming pass),
+        later calls - and ``iter_rows`` - are served from it; the same cell
+        objects as ``iter_rows``. ``ws._cells`` is a read-only mapping
+        {(row, column): cell} of the cells full mode keeps.
+        ``openrsxl.extended.release_cells(ws)`` frees the store
+    :param reopen: a workbook closed with ``close()`` reopens its file (the
+        path, or the file object it was loaded from) when it is used again,
+        as full mode stays usable after ``close()``; the shared strings are
+        kept
+
+    :param skip_invalid_defined_names: (any mode) a print titles defined
+        name that openpyxl cannot parse (eg. ``#N/A``) is skipped with a
+        warning instead of failing the load
+
     A feature flag left unset (None) follows ``read_all``; True / False
     enable / disable it whatever ``read_all`` is. The flags have no effect
     without ``read_only=True`` (full mode always reads everything and
@@ -112,8 +150,13 @@ def load_workbook(
     ``iter_rows(values_only=True)`` yields values only (merged cells are
     None, link targets fill empty linked cells, as in full mode).
 
+    Warnings of a sheet's data (eg. unsupported extensions) are reported by
+    its first complete pass only, as full mode reports them once per load.
+
     Limitations (docs/COMPATIBILITY.md): rows / columns and cell positions
-    are those of read-only mode (the sheet's ``<dimension>``); errors in
+    are those of read-only mode (the sheet's ``<dimension>``, unless
+    ``exact_dimensions``); iterating or accessing a position does not
+    create a cell or extend the sheet as full mode does; errors in
     cell data that make full mode fail at load time are raised while
     iterating; images, charts, drawings and pivot tables are not streamed.
     """
@@ -131,14 +174,66 @@ def load_workbook(
     )
     if formula_and_value and not read_only:
         raise ValueError("formula_and_value=True requires read_only=True")
-    options = _Options(**{k: bool(read_all) if v is None else v for k, v in given.items()})
-    if not read_only or not any(getattr(options, k) for k in FLAGS):
+    options = _Options(
+        **{k: bool(read_all) if v is None else v for k, v in given.items()},
+        exact_dimensions=exact_dimensions,
+        random_access=random_access,
+        reopen=reopen,
+    )
+    streaming = read_only and options.any()
+    if not streaming and not skip_invalid_defined_names:
         # exactly openpyxl
         reader = ExcelReader(filename, read_only, keep_vba, data_only, keep_links, rich_text)
     else:
-        reader = _ExtendedReader(filename, read_only, keep_vba, data_only, keep_links, rich_text, options=options)
+        reader = _ExtendedReader(
+            filename,
+            read_only,
+            keep_vba,
+            data_only,
+            keep_links,
+            rich_text,
+            options=options if streaming else None,
+            skip_invalid_defined_names=skip_invalid_defined_names,
+        )
     reader.read()
+    if streaming and options.reopen:
+        reader.wb._ext_source = filename
     return reader.wb
+
+
+def _assign_names(self):
+    """WorkbookParser.assign_names; a print titles definition openpyxl
+    cannot parse (ValueError, eg. #N/A) is skipped with a warning"""
+    for idx, names in self.defined_names.by_sheet().items():
+        if idx == "global":
+            self.wb.defined_names = names
+            continue
+
+        try:
+            sheet = self.wb._sheets[idx]
+        except IndexError:
+            warn(f"Defined names for sheet index {idx} cannot be located")
+            continue
+
+        for name, defn in names.items():
+            reserved = defn.is_reserved
+            if reserved is None:
+                sheet.defined_names[name] = defn
+
+            elif reserved == "Print_Titles":
+                try:
+                    titles = PrintTitles.from_string(defn.value)
+                except ValueError:
+                    warn(f"Print titles cannot be set to Defined name: {defn.value}.")
+                    continue
+                sheet._print_rows = titles.rows
+                sheet._print_cols = titles.cols
+            elif reserved == "Print_Area":
+                try:
+                    sheet._print_area = PrintArea.from_string(defn.value)
+                except TypeError:
+                    warn(f"Print area cannot be set to Defined name: {defn.value}.")
+                    continue
 
 
 open = load_workbook

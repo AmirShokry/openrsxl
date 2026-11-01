@@ -181,6 +181,45 @@ replacement without flags. `read_all=True` includes it; add
 `create_empty_cells=False` to keep read-only mode's `EmptyCell` while
 enabling everything else (sparse sheets: no object per empty position).
 
+### Access options
+
+These change how a sheet is accessed rather than what a cell holds, so
+`read_all` does not include them (default `False`, read-only workbooks):
+
+| option | effect |
+|---|---|
+| `exact_dimensions` | `min_row`, `max_row`, `min_column`, `max_column` - and so the rows and columns of `iter_rows()` - from the cells present, as full mode computes them (every cell of the file, also one with a style only, plus the cells the enabled features create), instead of the sheet's `<dimension>` element. Computed by the load-time pre-scan (byte searches, no cell objects). |
+| `random_access` | `ws.cell()` and `ws[...]` (a cell, a range, a column `"B"`, a row `5`) without reading the sheet again on every call. The first random access builds a store of the sheet's cells in one streaming pass; later calls, and `iter_rows`, are served from it with the same cell objects. Ranges, rows and columns hold every position, as full mode; `ws.iter_cols()` / `ws.columns` exist with it. `ws._cells` is a read-only mapping `{(row, column): cell}` of the cells full mode keeps (`.get`, `in`, `items()`, `len`, `bool`). `openrsxl.extended.release_cells(ws)` (or a workbook) frees the store. |
+| `reopen` | a workbook closed with `close()` reopens its file (the path, or the file object it was loaded from) when it is used again, as a full-mode workbook stays usable after `close()`. Its shared strings are kept. A pass started before `close()` goes on in any case. |
+
+`skip_invalid_defined_names=True` (any mode) skips a print titles defined
+name that openpyxl cannot parse (eg. `#N/A`, which makes openpyxl's
+`load_workbook` fail) with a warning.
+
+```python
+from openrsxl.extended import load_workbook, release_cells
+
+wb = load_workbook("book.xlsx", read_only=True, read_all=True,
+                   exact_dimensions=True, random_access=True, reopen=True)
+ws = wb["Data"]
+print(ws.max_row, ws.max_column)               # the cells' bounds, as full mode
+print(ws.cell(5, 2).value, ws["B5"].coordinate)  # one pass on first use, then a lookup
+total = sum(c.value or 0 for c in ws["C"])     # a column, every position
+present = ws._cells.get((5, 2))                # None where full mode has no cell
+release_cells(ws)                              # free the store (rebuilt on demand)
+```
+
+Streaming workbooks can be shared by threads (a GIL build of Python): each
+pass reads its own stream of the file, and what is built lazily (the
+random access store, merged-cell styles, `start_cell`) is built once under a
+per-sheet lock. Warnings of a sheet's data (eg. "Data Validation extension
+is not supported") are reported by its first complete pass only, as full
+mode reports them once per load.
+
+Unlike full mode, reading a position never creates a cell: full mode's
+`iter_rows(max_row=50)` or `ws.cell(50, 1)` add cells and raise `max_row`;
+streaming leaves the sheet as the file has it.
+
 Every value is what openpyxl's full mode returns for the same file - same
 attribute names, same types, same values. The only new names are
 `cell.formula` and `cell.cached_value`, because openpyxl has no attribute for
@@ -427,7 +466,8 @@ What differs, in full in [`docs/COMPATIBILITY.md`](https://github.com/AmirShokry
 
 * `cell.formula` and `cell.cached_value` are new names (see above); a
   disabled feature raises `AttributeError`.
-* Rows and columns are those of read-only mode: cells outside the sheet's
+* Rows and columns are those of read-only mode (unless `exact_dimensions`:
+  full mode's bounds): cells outside the sheet's
   `<dimension>` are not produced (cells *created* by a feature - a merged or
   linked empty cell - extend `max_row` / `max_column`), cell positions follow
   the `<row>` elements, and a sheet that claims a huge dimension yields that

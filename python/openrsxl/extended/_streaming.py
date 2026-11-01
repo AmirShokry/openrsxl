@@ -28,13 +28,30 @@ flag                           adds
                                style), instead of the shared ``EmptyCell``
 =============================  ==============================================
 
+Options outside ``read_all`` (they change how the sheet is accessed, not
+what a cell holds):
+
+=============================  ==============================================
+``exact_dimensions``           ``min_row`` / ``max_row`` / ``min_column`` /
+                               ``max_column`` (and so ``iter_rows()``) from
+                               the cells present, as full mode, instead of
+                               the ``<dimension>`` element
+``random_access``              ``ws.cell()`` / ``ws[...]`` from a store of the
+                               sheet's cells built on first use, and
+                               ``ws._cells``: a read-only mapping of them
+``reopen``                     a workbook closed with ``close()`` reopens its
+                               file when it is used again
+=============================  ==============================================
+
 Memory stays independent of the number of cells: rows are streamed exactly
 as in read-only mode; only the requested features themselves (merged ranges,
 hyperlinks, comments, dimensions...) are kept in memory.
 """
 
+import threading
 import warnings
 from array import array
+from collections.abc import Mapping
 from copy import copy
 
 from openrsxl import _native
@@ -82,6 +99,12 @@ FLAGS = (
     "read_tables",
     "create_empty_cells",
 )
+
+#: options outside read_all: how the sheet is accessed
+OPTIONS = ("exact_dimensions", "random_access", "reopen")
+
+#: lazily created shared objects (EmptyCell classes, reopened archives)
+_LOCK = threading.RLock()
 
 COMMENT_WARNING = """Cell '{0}':{1} is part of a merged range but has a comment which will be removed because merged cells cannot contain any data."""
 
@@ -165,9 +188,12 @@ def _empty_cell(names):
         return _EMPTY()
     cell = _EMPTY_CELLS.get(names)
     if cell is None:
-        attrs = {"__slots__": (), "__module__": __name__, "__doc__": EmptyCell.__doc__}
-        attrs.update(dict.fromkeys(names))
-        cell = _EMPTY_CELLS[names] = type("EmptyCell", (_EmptyCell,), attrs)()
+        with _LOCK:
+            cell = _EMPTY_CELLS.get(names)
+            if cell is None:
+                attrs = {"__slots__": (), "__module__": __name__, "__doc__": EmptyCell.__doc__}
+                attrs.update(dict.fromkeys(names))
+                cell = _EMPTY_CELLS[names] = type("EmptyCell", (_EmptyCell,), attrs)()
     return cell
 
 
@@ -181,11 +207,14 @@ class MergedCell(_MergedCell):
 
 
 class _Options:
-    __slots__ = FLAGS
+    __slots__ = FLAGS + OPTIONS
 
     def __init__(self, **kw):
-        for k in FLAGS:
+        for k in FLAGS + OPTIONS:
             setattr(self, k, bool(kw.get(k, False)))
+
+    def any(self):
+        return any(getattr(self, k) for k in FLAGS + OPTIONS)
 
     @property
     def cell_level(self):
@@ -224,12 +253,14 @@ class _Options:
         )
 
 
-def _scan(ws, want_rows=False, corners=None, parts=True):
+def _scan(ws, want_rows=False, corners=None, parts=True, bounds=False):
     """
     Pre-scan a worksheet: returns a WorkSheetParser filled by openpyxl's own
     handlers with everything outside the cell data (+ row dimensions and
     the style ids of the requested cells). parts=False: the style ids only
-    (the parts outside the cell data are not handled again).
+    (the parts outside the cell data are not handled again). bounds=True:
+    `parser._cell_bounds` = (min_row, min_col, max_row, max_col) of the
+    `<c>` elements (None without any), the keys of full mode's ws._cells.
     """
     parser = WorkSheetParser(
         None,
@@ -240,11 +271,12 @@ def _scan(ws, want_rows=False, corners=None, parts=True):
         timedelta_formats=ws.parent._timedelta_formats,
     )
     parser._corner_styles = {}
+    parser._cell_bounds = None
     result = None
     if _native.ENABLED:
         try:
             with ws._get_source() as src:
-                result = _native._rs.prescan_sheet(src, want_rows, corners, _native.reader_helpers())
+                result = _native._rs.prescan_sheet(src, want_rows, corners, _native.reader_helpers(), bounds)
         except _native.NativeFallback:
             result = None
     if result is not None:
@@ -261,11 +293,12 @@ def _scan(ws, want_rows=False, corners=None, parts=True):
                 parser.row_dimensions[str(idx)] = dict(attrs)
             for coord, s in result["corners"].items():
                 parser._corner_styles[coord] = s
+            parser._cell_bounds = result["bounds"]
             return parser
         except _native.NativeFallback:
             pass
     # exact (slower) path: the original parser over the whole document
-    parser = _python_scan(ws, corners)
+    parser = _python_scan(ws, corners, bounds)
     return parser
 
 
@@ -291,7 +324,7 @@ class _CornerParser(WorkSheetParser):
         keys = {k for k in attrs if not k.startswith("{")}
         if keys - {"r", "spans"}:
             self.row_dimensions[str(self.row_counter)] = attrs
-        if self._corners:
+        if self._corners or self._want_bounds:
             for el in row:
                 coordinate = el.get("r")
                 if coordinate:
@@ -302,10 +335,16 @@ class _CornerParser(WorkSheetParser):
                     r, c = self.row_counter, self.col_counter
                 if (r, c) in self._corners:
                     self._corner_styles[(r, c)] = el.get("s")
+                if self._want_bounds:
+                    b = self._cell_bounds
+                    if b is None:
+                        self._cell_bounds = (r, c, r, c)
+                    else:
+                        self._cell_bounds = (min(b[0], r), min(b[1], c), max(b[2], r), max(b[3], c))
         return self.row_counter, []
 
 
-def _python_scan(ws, corners):
+def _python_scan(ws, corners, bounds=False):
     with ws._get_source() as src:
         parser = _CornerParser(
             src,
@@ -317,6 +356,8 @@ def _python_scan(ws, corners):
         )
         parser._corners = set(corners or ())
         parser._corner_styles = {}
+        parser._want_bounds = bounds
+        parser._cell_bounds = None
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             for _ in parser.parse():
@@ -401,7 +442,9 @@ class _MergeInfo:
                     continue
                 for b in range(first, last + 1):
                     index.setdefault(b, []).append(i)
-            self._rows, self._index, self._tall = rows, index, tall
+            # (_index last: other threads test it)
+            self._rows, self._tall = rows, tall
+            self._index = index
         found = self._rows.get(row, ())
         more = index.get(row // self.BUCKET, ())
         if more or self._tall:
@@ -487,6 +530,12 @@ class _MergeInfo:
         """
         if self._styles is not None:
             return self._styles
+        with self.ws._lock:
+            if self._styles is None:
+                self._compute_styles()
+        return self._styles
+
+    def _compute_styles(self):
         ws = self.ws
         wb = ws.parent
         corners = set()
@@ -539,7 +588,6 @@ class _MergeInfo:
                 styles[i] = (None, self._template(cells, self.ranges[i]))
         cells.clear()
         self._styles = styles
-        return styles
 
     @staticmethod
     def _representative(rng):
@@ -651,6 +699,9 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
         self._ext = options or _Options()
         self._overlay = {}
         self._merge = None
+        # lazily built per-sheet state (merged styles, start cells, the
+        # random access store): built once, also with several threads
+        self._lock = threading.RLock()
         super().__init__(parent_workbook, title, worksheet_path, shared_strings)
         if self._ext.read_sheet_properties:
             # defaults of Worksheet._setup, overwritten by the file's values
@@ -677,13 +728,39 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
 
     _ext_bounds = None
 
+    # -- reopen ----------------------------------------------------------------
+    @property
+    def _shared_strings(self):
+        return self.__dict__["_strings"]
+
+    @_shared_strings.setter
+    def _shared_strings(self, value):
+        # Workbook.close() drops the shared strings of read-only sheets;
+        # with `reopen` the sheet stays usable, so they are kept
+        if self._ext.reopen and not value and self.__dict__.get("_strings"):
+            return
+        self.__dict__["_strings"] = value
+
+    def _get_source(self):
+        """Parse xml source on demand, must close after use"""
+        wb = self.parent
+        if self._ext.reopen:
+            try:
+                return wb._archive.open(self._worksheet_path)
+            except ValueError:
+                # closed (by close(), also while another thread used it)
+                if wb._archive.fp is not None:
+                    raise
+                return _reopen(wb).open(self._worksheet_path)
+        return wb._archive.open(self._worksheet_path)
+
     # -- binding (at load time, like openpyxl's full mode) ------------------
     def _ext_bind(self, archive, rels):
         opt = self._ext
         self._rels = rels
         parser = None
-        if opt.needs_tail:
-            parser = _scan(self, want_rows=opt.read_dimensions)
+        if opt.needs_tail or opt.exact_dimensions:
+            parser = _scan(self, want_rows=opt.read_dimensions, parts=opt.needs_tail, bounds=opt.exact_dimensions)
         if opt.read_merged_cells:
             ranges = []
             if parser.merged_cells:
@@ -713,6 +790,30 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
                 table = Table.from_tree(fromstring(archive.read(rel.Target)))
                 self._tables.add(table)
         self._ext_compute_bounds()
+        if opt.exact_dimensions:
+            self._exact_dimensions(parser._cell_bounds)
+
+    def _exact_dimensions(self, cells):
+        """
+        Bounds of full mode's ws._cells: the cells of the file (every <c>
+        element, also those with a style only) and those the features create
+        (merged ranges, hyperlinks, comments); 1 without any, and then
+        iter_rows() without arguments yields nothing, as full mode.
+        """
+        boxes = []
+        if cells is not None:
+            boxes.append(cells)
+        b = self._ext_bounds
+        if b is not None:
+            boxes.append((b[0], b[2], b[1], b[3]))
+        if not boxes:
+            self._min_row = self._min_column = self._max_row = self._max_column = 1
+            self._current_row = 0
+            return
+        self._min_row = min(x[0] for x in boxes)
+        self._min_column = min(x[1] for x in boxes)
+        self._max_row = max(x[2] for x in boxes)
+        self._max_column = max(x[3] for x in boxes)
 
     def _bind_merged(self, parsed):
         # the ranges as CellRange(ref) builds them from the parsed (already
@@ -738,6 +839,13 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
         cells = self.__dict__.get("_start_cells")
         if cells is not None:
             return cells
+        with self._lock:
+            cells = self.__dict__.get("_start_cells")
+            if cells is None:
+                cells = self._compute_start_cells()
+        return cells
+
+    def _compute_start_cells(self):
         cells = {}
         merge = self._merge
         if merge is None:
@@ -909,10 +1017,11 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
         return ReadOnlyCell if self._ext.cell_level else _ReadOnlyCell
 
     def _ext_empty(self):
-        """the filler of empty positions"""
-        if self.__dict__.get("_empty") is None:
-            self._empty = _empty_cell(self._ext.cell_names) if self._ext.cell_level else _EMPTY()
-        return self._empty
+        """the filler of empty positions (the same object for the sheet)"""
+        empty = self.__dict__.get("_empty")
+        if empty is None:
+            empty = self._empty = _empty_cell(self._ext.cell_names) if self._ext.cell_level else _EMPTY()
+        return empty
 
     def _ext_extra_slots(self):
         extra = []
@@ -925,9 +1034,13 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
     def _cells_by_row(self, min_col, min_row, max_col, max_row, values_only=False):
         max_col = max_col or self.max_column
         max_row = max_row or self.max_row
-        rows = self._ext_base_rows(min_col, min_row, max_col, max_row, values_only)
-        if self._overlay or self._merge is not None:
-            rows = self._apply_overlays(rows, min_col, min_row, max_col, max_row, values_only)
+        store = self.__dict__.get("_ra")
+        if store is not None and max_col and max_row:
+            rows = self._store_rows(store, min_col, min_row, max_col, max_row, values_only)
+        else:
+            rows = self._ext_base_rows(min_col, min_row, max_col, max_row, values_only)
+            if self._overlay or self._merge is not None:
+                rows = self._apply_overlays(rows, min_col, min_row, max_col, max_row, values_only)
         if self._ext.create_empty_cells and not values_only:
             rows = self._create_empty(rows, min_row, min_col)
         return rows
@@ -1014,6 +1127,11 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
     def _native_rows(self, reader, parser, min_col, max_col, values_only, cell_cls, filler, extra):
         actions = reader.actions
         consumed = 0
+        # a pass over the whole sheet replayed its warnings and the parts
+        # outside the cell data (handled by openpyxl at the end of a pass)
+        # without error and without fallback: later passes do the same, so
+        # their warnings are not repeated (full mode warns once per load)
+        replayed = self.__dict__.get("_replayed", False)
         while True:
             try:
                 item = reader.next_row(self, min_col, max_col, values_only, cell_cls, filler, extra)
@@ -1022,15 +1140,17 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
             if actions:
                 pending = list(actions)
                 del actions[:]
-                try:
-                    _native.replay(parser, pending)
-                except _native.NativeFallback:
-                    item = False
+                if not replayed:
+                    try:
+                        _native.replay(parser, pending)
+                    except _native.NativeFallback:
+                        item = False
             if item is False:
                 with self._get_source() as src:
                     yield from self._python_rows(src, consumed, min_col, max_col, values_only, filler)
                 return
             if item is None:
+                self._replayed = True
                 return
             consumed += 1
             yield item
@@ -1087,8 +1207,142 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
                 new_row[i] = c
         return tuple(new_row)
 
+    # -- random access ----------------------------------------------------------
+    def __getitem__(self, key):
+        if not self._ext.random_access:
+            return Worksheet.__getitem__(self, key)
+        # Worksheet.__getitem__: every position of the range, as full mode
+        # (iter_rows keeps read-only mode's rows, store or not)
+        if isinstance(key, slice):
+            if not all([key.start, key.stop]):
+                raise IndexError(f"{key} is not a valid coordinate or range")
+            key = f"{key.start}:{key.stop}"
+        if isinstance(key, int):
+            key = str(key)
+        min_col, min_row, max_col, max_row = range_boundaries(key)
+        if not any([min_col, min_row, max_col, max_row]):
+            raise IndexError(f"{key} is not a valid coordinate or range")
+        if min_row is None:
+            cols = tuple(self.iter_cols(min_col, max_col))
+            if min_col == max_col:
+                cols = cols[0]
+            return cols
+        if min_col is None:
+            rows = tuple(self._positions(1, min_row, self._bound(1), max_row))
+            if min_row == max_row:
+                rows = rows[0]
+            return rows
+        if ":" not in key:
+            return self._get_cell(min_row, min_col)
+        return tuple(self._positions(min_col, min_row, max_col, max_row))
+
+    def _positions(self, min_col, min_row, max_col, max_row):
+        """Rows of the cells at every position of the range (full mode's
+        iter_rows with explicit bounds)"""
+        get = self._get_cell
+        for r in range(min_row, max_row + 1):
+            yield tuple([get(r, c) for c in range(min_col, max_col + 1)])
+
+    @property
+    def _cells(self):
+        if not self._ext.random_access:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '_cells'")
+        return CellsView(self)
+
+    # columns (also ws["B"], ws["B:D"]): full mode's, cell by cell from the store
+    @property
+    def iter_cols(self):
+        if not self._ext.random_access:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute 'iter_cols'")
+        return self._iter_cols
+
+    def _iter_cols(self, min_col=None, max_col=None, min_row=None, max_row=None, values_only=False):
+        # Worksheet.iter_cols; an unsized sheet (no <dimension>): the bounds
+        # of its cells, which full mode always has
+        if self._current_row == 0 and not any([min_col, min_row, max_col, max_row]):
+            return iter(())
+        min_col = min_col or 1
+        min_row = min_row or 1
+        max_col = max_col or self._bound(1)
+        max_row = max_row or self._bound(0)
+        return self._cells_by_col(min_col, min_row, max_col, max_row, values_only)
+
+    def _bound(self, axis):
+        """max_row (axis 0) / max_column (1), or the store's for an unsized
+        sheet"""
+        v = self.max_row if axis == 0 else self.max_column
+        if v is None:
+            v = self._store().bounds[axis]
+        return v
+
+    @property
+    def columns(self):
+        if not self._ext.random_access:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute 'columns'")
+        return self.iter_cols()
+
+    _cells_by_col = Worksheet._cells_by_col
+
+    def _store(self):
+        """
+        The random access store: the cells of one complete pass by position,
+        as iter_rows yields them (built on first use, kept until
+        release_cells)
+        """
+        store = self.__dict__.get("_ra")
+        if store is None:
+            with self._lock:
+                store = self.__dict__.get("_ra")
+                if store is None:
+                    store = self._ra = self._build_store()
+        return store
+
+    def _build_store(self):
+        empty = self._ext_empty()
+        rows = {}
+        count = 0
+        n = 0
+        max_col = 0
+        base = self._ext_base_rows(1, 1, None, None, False)
+        if self._overlay or self._merge is not None:
+            base = self._apply_overlays(base, 1, 1, None, None, False)
+        for n, row in enumerate(base, 1):
+            if row:
+                cells = {c: cell for c, cell in enumerate(row, 1) if cell is not empty}
+                if cells:
+                    rows[n] = cells
+                    count += len(cells)
+                    max_col = max(max_col, max(cells))
+        return _Store(rows, n, count, max_col)
+
+    def _store_rows(self, store, min_col, min_row, max_col, max_row, values_only):
+        """iter_rows from the store: the rows a streaming pass yields (up to
+        the last row of the file / of the cells created by the features)"""
+        filler = None if values_only else self._ext_empty()
+        cols = range(min_col, max_col + 1)
+        empty_row = (filler,) * len(cols)
+        rows = store.rows
+        for r in range(min_row, min(max_row, store.n) + 1):
+            cells = rows.get(r)
+            if cells is None:
+                yield empty_row
+            elif values_only:
+                yield tuple([cells[c].value if c in cells else None for c in cols])
+            else:
+                get = cells.get
+                yield tuple([get(c, filler) for c in cols])
+
     def _get_cell(self, row, column):
         """Cells are returned by a generator which can be empty"""
+        if self._ext.random_access:
+            cells = self._store().rows.get(row)
+            if cells is not None:
+                c = cells.get(column)
+                if c is not None:
+                    return c
+            if self._ext.create_empty_cells:
+                return self._new_cell(self._ext_cell_cls(), self._ext_extra_slots(), row, column)
+            return self._ext_empty()
         for cells in self._cells_by_row(column, row, column, row):
             if cells:
                 return cells[0]
@@ -1243,6 +1497,88 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
             comment.bind(cell)
             cell.comment = comment
         return cell
+
+
+class _Store:
+    """Cells of a streaming sheet by position: {row: {column: cell}}"""
+
+    __slots__ = ("rows", "n", "count", "bounds")
+
+    def __init__(self, rows, n, count, max_col):
+        self.rows = rows
+        self.n = n  # rows a complete pass yields
+        self.count = count
+        # (max row, max column) of the cells, 1 without any (full mode)
+        self.bounds = (max(rows, default=1), max_col or 1)
+
+
+class CellsView(Mapping):
+    """
+    ``ws._cells`` of a streaming worksheet with ``random_access``: a
+    read-only mapping {(row, column): cell} of the cells full mode keeps -
+    those of the file and those the features create - in row order (full
+    mode: file order, then the cells created by the features). Positions
+    that only full mode's iter_rows() / cell() would create are not in it.
+    """
+
+    __slots__ = ("_ws",)
+
+    def __init__(self, ws):
+        self._ws = ws
+
+    def _rows(self):
+        return self._ws._store().rows
+
+    def __getitem__(self, key):
+        hash(key)  # TypeError for unhashable keys, as dict
+        try:
+            row, col = key
+            return self._rows()[row][col]
+        except (KeyError, TypeError, ValueError):
+            raise KeyError(key) from None
+
+    def __contains__(self, key):
+        hash(key)
+        try:
+            row, col = key
+            return col in self._rows()[row]
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def __iter__(self):
+        for row, cells in self._rows().items():
+            for col in cells:
+                yield (row, col)
+
+    def __len__(self):
+        return self._ws._store().count
+
+    def __repr__(self):
+        return f"<CellsView of {self._ws.title!r}: {len(self)} cells>"
+
+
+def release_cells(obj):
+    """Free the random access store of a streaming worksheet (or of every
+    worksheet of a workbook); it is built again on the next random access"""
+    sheets = getattr(obj, "_sheets", None)
+    for ws in [obj] if sheets is None else sheets:
+        d = getattr(ws, "__dict__", None)
+        if d is not None:
+            d.pop("_ra", None)
+
+
+def _reopen(wb):
+    """The archive of a workbook closed with close(), opened again"""
+    from openrsxl.reader.excel import _validate_archive
+
+    with _LOCK:
+        archive = wb._archive
+        if archive.fp is None:
+            src = wb._ext_source
+            if hasattr(src, "seek"):
+                src.seek(0)
+            archive = wb._archive = _validate_archive(src)
+    return archive
 
 
 def _clone_range(cr, cls):

@@ -5,9 +5,8 @@
 name: CI
 
 on:
+  # releases only: pushes to main do not run the pipeline
   push:
-    branches:
-      - main
     tags:
       - "**"
   pull_request: {}

@@ -49,6 +49,7 @@ ALL_CHECKS = (
     "ext",
     "ext_data_only",
     "ext_subset",
+    "ext_access",
     "llm",
 )
 
@@ -65,7 +66,7 @@ def _subset(path):
 #: claiming A1:XFD1048576 yields 17 billion cells (in both libraries); the
 #: streaming checks of such files are skipped
 MAX_STREAMED_CELLS = 5_000_000
-STREAMED = {"read_only", "read_only_data_only", "ext", "ext_data_only", "ext_subset"}
+STREAMED = {"read_only", "read_only_data_only", "ext", "ext_data_only", "ext_subset", "ext_access"}
 
 
 def streamed_area(path):
@@ -110,7 +111,17 @@ def check_one(path, checks):
         flags, data_only = _subset(path)
         return compare_extended(path, data_only=data_only, flags=flags)
 
+    def access():
+        # every feature + exact_dimensions / random_access (ws.cell, ws[...],
+        # ws._cells against full mode)
+        from oracle.extended import ALL_FLAGS
+
+        data_only = bool(zlib.crc32(os.path.basename(path).encode()) % 2)
+        flags = dict(ALL_FLAGS, exact_dimensions=True, random_access=True)
+        return compare_extended(path, data_only=data_only, flags=flags)
+
     runs["ext_subset"] = subset
+    runs["ext_access"] = access
     out = {}
     for name in checks:
         if name in STREAMED and area > MAX_STREAMED_CELLS:

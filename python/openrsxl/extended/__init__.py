@@ -29,6 +29,17 @@ Additions:
     openpyxl's ``load_workbook``. See ``help(load_workbook)``, the
     README and docs/COMPATIBILITY.md (limitations).
 
+    Access options, outside ``read_all``: ``exact_dimensions`` (the bounds
+    of the cells present, as full mode, not the ``<dimension>`` element),
+    ``random_access`` (``ws.cell()`` / ``ws[...]`` from a store of the
+    sheet's cells built on first use; ``ws._cells`` a read-only mapping),
+    ``reopen`` (usable after ``close()``, as full mode); in any mode
+    ``skip_invalid_defined_names`` (unparsable print titles are skipped).
+
+``release_cells(ws or wb)``
+    free the random access store of a streaming worksheet (built again on
+    the next random access).
+
 ``openrsxl.extended.llm``
     lossless, LLM readable compression of workbooks: ``compress_workbook``
     (separable sections - values, formulas, styles, metadata - to memory,
@@ -183,6 +194,7 @@ def __dir__():
 
 # -- extended features -------------------------------------------------------
 from ._load import load_workbook, open  # noqa: E402,F401,F811
+from ._streaming import release_cells  # noqa: E402,F401
 
 
 def release(wb):

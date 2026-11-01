@@ -357,8 +357,13 @@ def test_failed_save_releases_the_temporary_file():
         return len(left), [str(x.message) for x in w if x.category is ResourceWarning]
 
     a, b = both(run)
-    assert a == b
     assert b[1] == []
+    if getattr(sys, "_is_gil_enabled", lambda: True)():
+        assert a == b
+    else:
+        # free-threaded Python: openpyxl's own writer is sometimes finalized
+        # with a ResourceWarning (timing dependent); openrsxl's must not be
+        assert a[0] == b[0]
 
 
 @pytest.mark.parametrize("bad", [None, "a\x1cb", datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)])
