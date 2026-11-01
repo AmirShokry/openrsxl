@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1
+
+* Fixed (extended): the warnings of a streaming sheet's data were still
+  repeated on every pass when the pure Python reader is used (the native
+  engine disabled, or its fallback); they are reported by the first
+  complete pass only, as with the native engine. The release build of 0.4.0
+  failed on this test, so 0.4.0 was not published: 0.4.1 is its first
+  release, with everything listed below.
+
 ## 0.4.0
 
 Streaming (`openrsxl.extended`, read-only) options to replace full mode
