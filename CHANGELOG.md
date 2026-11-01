@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+* Performance (extended streaming): sheets with many merged cells,
+  hyperlinks or both. Each merged range ran openpyxl's merge logic on a new
+  worksheet; ranges that overlap no other one now share one result per
+  shape and corner styles (the same cells and styles: the logic depends on
+  nothing else), on one worksheet reused throughout. The ranges containing a
+  row are looked up by row, and a hyperlink's relationship by Id instead of
+  a scan of all relationships per link (also in full mode). 20k merged
+  ranges: 7.2 s / +311 MB -> 0.9 s / +53 MB (openpyxl full mode: 2.5 s /
+  +84 MB); 40k ranges, 20 per row: 20.1 s / +577 MB -> 1.4 s / +74 MB
+  (openpyxl: 3.6 s / +78 MB); 20k hyperlinks: 8.8 s -> 0.8 s (openpyxl:
+  9.4 s). Results unchanged; without the streaming flags nothing changes.
+
 ## 0.3.0
 
 * `openrsxl.extended.llm`: lossless, LLM readable compression of workbooks.

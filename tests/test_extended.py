@@ -9,7 +9,8 @@ import zipfile
 
 import openpyxl
 import pytest
-from fixtures import MAIN, make_xlsx, sheet_xml
+from fixtures import DEFAULT_STYLES, MAIN, make_xlsx, sheet_xml
+from openpyxl.utils import get_column_letter
 from oracle.extended import ALL_FLAGS, compare_extended
 
 import openrsxl
@@ -690,3 +691,111 @@ def test_disabled_features_do_not_exist_on_any_cell(flag):
                 assert has == expected | {"hyperlink", "comment"}, (flag, c)
             else:
                 assert has == expected, (flag, type(c).__name__, has)
+
+
+def _many_merges(wb):
+    # merged ranges of a few shapes, their corner cells cycling through a few
+    # styles (repeated templates), large ranges of the same representative
+    # shape but different sizes, and overlapping ranges
+    from openpyxl.styles import Border, Protection, Side
+
+    sides = [None, Side(style="thin"), Side(style="thick", color="FF0000")]
+    ws = wb.active
+    shapes = [(1, 2), (2, 1), (2, 3), (1, 1), (9, 9), (12, 9), (3, 30)]
+    row = 1
+    for k in range(60):
+        h, w = shapes[k % len(shapes)]
+        top, end = sides[k % 3], sides[(k // 3) % 3]
+        start = ws.cell(row, 2, f"m{k}")
+        if top is not None:
+            start.border = Border(top=top, left=top)
+        if k % 4 == 0:
+            start.protection = Protection(locked=False)
+        if end is not None:
+            ws.cell(row + h - 1, 2 + w - 1).border = Border(bottom=end, right=end)
+        ws.merge_cells(start_row=row, start_column=2, end_row=row + h - 1, end_column=2 + w - 1)
+        row += h + (k % 2)
+    ws.merge_cells("AH1:AJ3")
+    ws.merge_cells("AI2:AK4")  # overlaps the previous one
+    ws["AH1"].border = Border(top=sides[2])
+    ws.cell(5, 34).hyperlink = "https://example.com/m"
+
+
+MANY_MERGES = openpyxl_book(_many_merges)
+
+_MERGE_STYLES = DEFAULT_STYLES.replace(
+    '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>',
+    '<borders count="3"><border><left/><right/><top/><bottom/><diagonal/></border>'
+    '<border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="thin"/><diagonal/></border>'
+    '<border><left/><right style="thick"><color rgb="FFFF0000"/></right><top/>'
+    '<bottom style="thick"><color rgb="FFFF0000"/></bottom><diagonal/></border></borders>',
+).replace(
+    '<cellXfs count="7">',
+    '<cellXfs count="10">'
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>'
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="2" xfId="0" applyBorder="1"/>'
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyProtection="1">'
+    '<protection locked="0"/></xf>',
+)
+
+
+def _raw_merges():
+    # the corner cells of merged ranges styled independently of each other,
+    # as Excel writes them (openpyxl's merge_cells re-formats them on save):
+    # styles 0, 7 (thin), 8 (thick right / bottom), 9 (thin, unlocked)
+    shapes = [(1, 2), (2, 1), (2, 3), (1, 1), (9, 9), (12, 9), (3, 30), (4, 4)]
+    starts, ends = [None, 7, 8, 9], ["absent", 0, 7, 8]
+    cells, refs, row = {}, [], 1
+    for k in range(64):
+        h, w = shapes[k % len(shapes)]
+        s, e = starts[k % 4], ends[(k // 4) % 4]
+        attr = f' s="{s}"' if s is not None else ""
+        cells.setdefault(row, {})[2] = f'<c r="B{row}"{attr} t="n"><v>{k}</v></c>'
+        end_row, end_col = row + h - 1, 2 + w - 1
+        if e != "absent" and (end_row, end_col) != (row, 2):
+            ref = f"{get_column_letter(end_col)}{end_row}"
+            cells.setdefault(end_row, {})[end_col] = f'<c r="{ref}" s="{e}"/>'
+        refs.append(f"B{row}:{get_column_letter(end_col)}{end_row}")
+        row = end_row + 1 + (k % 2)
+    data = "".join(f'<row r="{r}">' + "".join(cs[c] for c in sorted(cs)) + "</row>" for r, cs in sorted(cells.items()))
+    merges = f'<mergeCells count="{len(refs)}">' + "".join(f'<mergeCell ref="{r}"/>' for r in refs) + "</mergeCells>"
+    return make_xlsx(raw_sheets=[sheet_xml(data, after=merges)], styles=_MERGE_STYLES)
+
+
+RAW_MERGES = _raw_merges()
+
+
+@pytest.mark.parametrize("data_only", [False, True])
+@pytest.mark.parametrize("flags", [{"read_merged_cells": True}, None])
+def test_merged_range_templates(flags, data_only):
+    assert compare_extended(MANY_MERGES, data_only=data_only, flags=flags) == []
+    assert compare_extended(RAW_MERGES, data_only=data_only, flags=flags) == []
+
+
+def _rels(*targets):
+    body = "".join(
+        f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"'
+        f' Target="{target}" TargetMode="External"/>'
+        for rid, target in targets
+    )
+    return (
+        SHEET_RELS[0],
+        '<?xml version="1.0" encoding="UTF-8"?><Relationships'
+        f' xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>',
+    )
+
+
+@pytest.mark.parametrize(
+    "rels",
+    [
+        # the first relationship of an Id wins, as RelationshipList.get
+        [("rId1", "https://example.com/first"), ("rId1", "https://example.com/second"), ("rId2", "https://x.org")],
+        # a link to a missing relationship: the same KeyError at load time
+        [("rId2", "https://x.org")],
+    ],
+)
+def test_hyperlink_relationships(rels):
+    links = '<hyperlinks><hyperlink ref="A1" r:id="rId1"/><hyperlink ref="B1" r:id="rId2"/></hyperlinks>'
+    data = add_files(raw(CELLS, after=links, rels=False), dict([_rels(*rels)]))
+    assert compare_extended(data, flags={"read_hyperlinks": True}) == []
+    assert compare_extended(data) == []

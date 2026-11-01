@@ -504,9 +504,16 @@ class WorksheetReader:
 
 
     def bind_hyperlinks(self):
+        # openrsxl: one lookup table instead of a scan of the relationships
+        # per link (the first of each Id, as RelationshipList.get)
+        by_id = {}
+        for r in self.ws._rels:
+            by_id.setdefault(r.Id, r)
         for link in self.parser.hyperlinks.hyperlink:
             if link.id:
-                rel = self.ws._rels.get(link.id)
+                rel = by_id.get(link.id)
+                if rel is None:
+                    rel = self.ws._rels.get(link.id)  # (its KeyError)
                 link.target = rel.Target
             if ":" in link.ref:
                 # range of cells

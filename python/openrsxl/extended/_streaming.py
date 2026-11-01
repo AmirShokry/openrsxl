@@ -34,7 +34,7 @@ hyperlinks, comments, dimensions...) are kept in memory.
 """
 
 import warnings
-from collections import defaultdict
+from array import array
 from copy import copy
 
 from openrsxl import _native
@@ -224,11 +224,12 @@ class _Options:
         )
 
 
-def _scan(ws, want_rows=False, corners=None):
+def _scan(ws, want_rows=False, corners=None, parts=True):
     """
     Pre-scan a worksheet: returns a WorkSheetParser filled by openpyxl's own
     handlers with everything outside the cell data (+ row dimensions and
-    the style ids of the requested cells).
+    the style ids of the requested cells). parts=False: the style ids only
+    (the parts outside the cell data are not handled again).
     """
     parser = WorkSheetParser(
         None,
@@ -252,9 +253,9 @@ def _scan(ws, want_rows=False, corners=None):
             # read-only mode reports those while iterating, not here
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                for snippet, ns in result["head"]:
+                for snippet, ns in result["head"] if parts else ():
                     parser._dispatch_snippet(snippet, ns)
-                for snippet, ns in result["tail"]:
+                for snippet, ns in result["tail"] if parts else ():
                     parser._dispatch_snippet(snippet, ns)
             for idx, attrs in result["rows"]:
                 parser.row_dimensions[str(idx)] = dict(attrs)
@@ -332,6 +333,26 @@ def _style_id_of(s):
     return s
 
 
+class _Rect:
+    """
+    Bounds of a merged range (the internal geometry of _MergeInfo; the
+    user's ws.merged_cells are separate objects): CellRange's own coord /
+    cells / size on four ints
+    """
+
+    __slots__ = ("min_row", "min_col", "max_row", "max_col")
+
+    def __init__(self, min_row, min_col, max_row, max_col):
+        self.min_row = min_row
+        self.min_col = min_col
+        self.max_row = max_row
+        self.max_col = max_col
+
+    coord = CellRange.coord
+    cells = CellRange.cells
+    size = CellRange.size
+
+
 class _MergeInfo:
     """Merged ranges with the styles openpyxl's full mode gives their cells."""
 
@@ -342,7 +363,7 @@ class _MergeInfo:
     def __init__(self, ws, ranges):
         self.ws = ws
         self.ranges = ranges  # list of CellRange, file order
-        self.by_row = sorted(range(len(ranges)), key=lambda i: ranges[i].min_row)
+        self.by_row = array("q", sorted(range(len(ranges)), key=lambda i: ranges[i].min_row))
         self._styles = None  # computed on first cell iteration
         self.shadow_starts = {}  # range index -> start_cell of the simulation
 
@@ -361,22 +382,30 @@ class _MergeInfo:
     BUCKET = 64
 
     def _candidates(self, row):
+        """Indices (file order) of the ranges that may contain `row`"""
         index = self.__dict__.get("_index")
         if index is None:
-            # ranges spanning many buckets (eg. whole columns) are kept in a
-            # separate list so the index stays proportional to the ranges
-            index, tall = {}, []
+            # ranges of up to BUCKET rows are indexed by row, taller ones by
+            # bucket of BUCKET rows, those spanning many buckets (eg. whole
+            # columns) are kept in a separate list: the index stays
+            # proportional to the ranges
+            rows, index, tall = {}, {}, []
             for i, r in enumerate(self.ranges):
+                if r.max_row - r.min_row < self.BUCKET:
+                    for k in range(r.min_row, r.max_row + 1):
+                        rows.setdefault(k, []).append(i)
+                    continue
                 first, last = r.min_row // self.BUCKET, r.max_row // self.BUCKET
                 if last - first > 16:
                     tall.append(i)
                     continue
                 for b in range(first, last + 1):
                     index.setdefault(b, []).append(i)
-            self._index, self._tall = index, tall
-        found = index.get(row // self.BUCKET, ())
-        if self._tall:
-            return sorted(set(found).union(self._tall))
+            self._rows, self._index, self._tall = rows, index, tall
+        found = self._rows.get(row, ())
+        more = index.get(row // self.BUCKET, ())
+        if more or self._tall:
+            return sorted(set(found).union(more, self._tall))
         return found
 
     def merged_coord(self, row, col):
@@ -389,9 +418,39 @@ class _MergeInfo:
                     return r
         return None
 
+    def covered_starts(self):
+        """Indices of the ranges whose top-left cell another range covers
+        (merged_coord of the top-left cell is not None): only ranges that
+        overlap another one, ie. in a group of more than one range"""
+        covered = self.__dict__.get("_covered")
+        if covered is None:
+            covered = set()
+            for group in self._groups():
+                if len(group) > 1:
+                    for i in group:
+                        r = self.ranges[i]
+                        if self.merged_coord(r.min_row, r.min_col) is not None:
+                            covered.add(i)
+            self._covered = covered
+        return covered
+
     # -- styles -------------------------------------------------------------
     def _groups(self):
-        """Indices of ranges grouped by overlap (overlapping ranges interact)"""
+        """Indices of ranges grouped by overlap (overlapping ranges interact),
+        in a stable order (the groups' first ranges in file order)"""
+        roots = self.__dict__.get("_roots")
+        if roots is None:
+            roots = self._roots = self._compute_roots()
+        groups = {}
+        for i, root in enumerate(roots):
+            g = groups.get(root)
+            if g is None:
+                groups[root] = [i]
+            else:
+                g.append(i)
+        return groups.values()
+
+    def _compute_roots(self):
         n = len(self.ranges)
         parent = list(range(n))
 
@@ -411,15 +470,20 @@ class _MergeInfo:
                 if not (rj.max_col < ri.min_col or ri.max_col < rj.min_col):
                     parent[find(i)] = find(j)
             active.append(i)
-        groups = defaultdict(list)
-        for i in range(n):
-            groups[find(i)].append(i)
-        return [sorted(g) for g in groups.values()]
+        return array("q", (find(i) for i in range(n)))
 
     def compute_styles(self):
         """
         Run openpyxl's own merge logic (MergedCellRange, _clean_merge_range)
         on a detached worksheet holding only the corner cells.
+
+        The logic reads and writes the cells of the range only, so groups
+        (which share no cell) run one after the other on one worksheet,
+        cleared in between. The result of a range that overlaps no other one
+        depends on its shape and the styles of its corner cells only: it is
+        computed once per (shape, corner styles), as a template by position
+        relative to the top-left cell (computing it again would register no
+        new style: the registries keep the first index of a value).
         """
         if self._styles is not None:
             return self._styles
@@ -429,38 +493,51 @@ class _MergeInfo:
         for r in self.ranges:
             corners.add((r.min_row, r.min_col))
             corners.add((r.max_row, r.max_col))
-        parser = _scan(ws, want_rows=False, corners=corners)
+        parser = _scan(ws, want_rows=False, corners=corners, parts=False)
         present = {coord: _style_id_of(s) for coord, s in parser._corner_styles.items()}
-        styles = {}  # range index -> callable(row, col) -> spec
+        styles = [None] * len(self.ranges)  # range index -> (representative shape or None, template)
+        templates = {}
+        shadow = Worksheet(wb)
+        cells = shadow._cells
 
         for group in self._groups():
-            shadow = Worksheet(wb)
-            if (
-                len(group) == 1
-                and self.ranges[group[0]].size["rows"] * self.ranges[group[0]].size["columns"] > self.SMALL
-            ):
-                rng = self.ranges[group[0]]
-                rep = self._representative(rng)
-                self._place(shadow, present, rng, rep)
-                mcr = _MergedCellRange(shadow, rep.coord)
-                shadow._clean_merge_range(mcr)
-                styles[group[0]] = (rep, self._results(shadow, rep))
+            if len(group) == 1:
+                i = group[0]
+                rng = self.ranges[i]
+                rows, cols = rng.size["rows"], rng.size["columns"]
+                large = rows * cols > self.SMALL
+                shape = (min(rows, 3), min(cols, 3)) if large else (rows, cols)
+                start, end = (rng.min_row, rng.min_col), (rng.max_row, rng.max_col)
+                key = (large, shape, present.get(start, _MISSING), present.get(end, _MISSING))
+                entry = templates.get(key)
+                if entry is None:
+                    cells.clear()
+                    rep = self._representative(rng) if large else rng
+                    self._place(shadow, present, rng, rep)
+                    mcr = _MergedCellRange(shadow, rep.coord)
+                    shadow._clean_merge_range(mcr)
+                    entry = templates[key] = (shape if large else None, self._template(cells, rep))
+                styles[i] = entry
                 continue
+            cells.clear()
             for i in group:
                 rng = self.ranges[i]
                 for coord in ((rng.min_row, rng.min_col), (rng.max_row, rng.max_col)):
-                    if coord in present and coord not in shadow._cells:
-                        shadow._cells[coord] = Cell(
+                    if coord in present and coord not in cells:
+                        cells[coord] = Cell(
                             shadow, row=coord[0], column=coord[1], style_array=wb._cell_styles[present[coord]]
                         )
+            starts = {}
             for i in group:
                 mcr = _MergedCellRange(shadow, self.ranges[i].coord)
                 shadow._clean_merge_range(mcr)
                 # the cell object full mode keeps as this range's start_cell
                 # (later overlapping ranges may replace it in ws._cells)
-                self.shadow_starts[i] = mcr.start_cell
+                starts[i] = mcr.start_cell
             for i in group:
-                styles[i] = (None, self._results(shadow, self.ranges[i]))
+                self.shadow_starts[i] = _Spec(starts[i])
+                styles[i] = (None, self._template(cells, self.ranges[i]))
+        cells.clear()
         self._styles = styles
         return styles
 
@@ -474,6 +551,8 @@ class _MergeInfo:
 
     @staticmethod
     def _place(shadow, present, rng, rep):
+        """The corner cells of `rng` as the file has them, the bottom-right
+        one at the bottom-right of `rep` (`rng` itself or its representative)"""
         wb = shadow.parent
         start = (rng.min_row, rng.min_col)
         end = (rng.max_row, rng.max_col)
@@ -481,36 +560,39 @@ class _MergeInfo:
             shadow._cells[start] = Cell(
                 shadow, row=start[0], column=start[1], style_array=wb._cell_styles[present[start]]
             )
-        if end in present:
-            rep_end = (rep.max_row, rep.max_col)
+        rep_end = (rep.max_row, rep.max_col)
+        if end in present and rep_end not in shadow._cells:
             shadow._cells[rep_end] = Cell(
                 shadow, row=rep_end[0], column=rep_end[1], style_array=wb._cell_styles[present[end]]
             )
 
     @staticmethod
-    def _results(shadow, rng):
-        out = {}
-        for coord in rng.cells:
-            out[coord] = shadow._cells[coord]
-        return out
+    def _template(cells, rng):
+        """The shadow cells of `rng` by position relative to its top-left cell"""
+        r0, c0 = rng.min_row, rng.min_col
+        return {(r - r0, c - c0): _Spec(cells[(r, c)]) for r, c in rng.cells}
 
     def spec(self, idx, row, col):
-        """The shadow cell (Cell or MergedCell) for (row, col) of range idx"""
-        rep, results = self.compute_styles()[idx]
-        if rep is None:
-            return results[(row, col)]
+        """What full mode has at (row, col) of range idx (a _Spec)"""
+        shape, tpl = self.compute_styles()[idx]
         rng = self.ranges[idx]
+        if shape is None:
+            return tpl[(row - rng.min_row, col - rng.min_col)]
+        # large range: its representative of at most 3x3 cells (same edges)
+        h, w = shape
+        r = 0 if row == rng.min_row else (h - 1 if row == rng.max_row else 1)
+        c = 0 if col == rng.min_col else (w - 1 if col == rng.max_col else 1)
+        return tpl[(r, c)]
 
-        def map_(v, lo, hi, rep_lo, rep_hi):
-            if v == lo:
-                return rep_lo
-            if v == hi:
-                return rep_hi
-            return rep_lo + 1
 
-        r = map_(row, rng.min_row, rng.max_row, rep.min_row, rep.max_row)
-        c = map_(col, rng.min_col, rng.max_col, rep.min_col, rep.max_col)
-        return results[(r, c)]
+class _Spec:
+    """A cell of openpyxl's merge logic: a MergedCell or not, and its style"""
+
+    __slots__ = ("merged", "_style")
+
+    def __init__(self, cell):
+        self.merged = isinstance(cell, _MergedCell)
+        self._style = cell._style
 
 
 class StreamedMergedCellRange(_MergedCellRange):
@@ -605,8 +687,7 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
         if opt.read_merged_cells:
             ranges = []
             if parser.merged_cells:
-                for cr in parser.merged_cells.mergeCell:
-                    ranges.append(cr.coord)
+                ranges = parser.merged_cells.mergeCell
             self._bind_merged(ranges)
         if opt.read_hyperlinks:
             self._bind_hyperlinks(parser.hyperlinks.hyperlink)
@@ -633,12 +714,16 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
                 self._tables.add(table)
         self._ext_compute_bounds()
 
-    def _bind_merged(self, refs):
+    def _bind_merged(self, parsed):
+        # the ranges as CellRange(ref) builds them from the parsed (already
+        # validated) ones: the same descriptor values (kept in __dict__)
         mcrs = []
         ranges = []
-        for ref in refs:
-            mcrs.append(StreamedMergedCellRange._new(self, ref))
-            ranges.append(CellRange(ref))
+        for cr in parsed:
+            mcr = _clone_range(cr, StreamedMergedCellRange)
+            mcr.ws = self
+            mcrs.append(mcr)
+            ranges.append(_Rect(cr.min_row, cr.min_col, cr.max_row, cr.max_col))
         self.merged_cells = MultiCellRange(mcrs)
         self._merge = _MergeInfo(self, ranges) if ranges else None
 
@@ -660,9 +745,8 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
             return cells
         merge.compute_styles()
         orphans = {}
-        for i, r in enumerate(merge.ranges):
-            if merge.merged_coord(r.min_row, r.min_col) is not None:
-                orphans.setdefault(r.coord, i)
+        for i in sorted(merge.covered_starts()):
+            orphans.setdefault(merge.ranges[i].coord, i)
         starts = {(r.min_row, r.min_col) for r in merge.ranges}
         min_row = min(r for r, _ in starts)
         max_row = max(r for r, _ in starts)
@@ -690,7 +774,7 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
                 cells[r.coord] = live.get(key)
                 continue
             shadow = merge.shadow_starts[i]
-            if isinstance(shadow, _MergedCell):
+            if shadow.merged:
                 c = self._ext.merged_cell_cls(self, key[0], key[1])
                 c._style = copy(shadow._style)
             else:
@@ -713,9 +797,12 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
         return self._merge is not None and self._merge.merged_coord(row, col) is not None
 
     def _bind_hyperlinks(self, links):
+        by_id = _rels_by_id(self._rels)
         for link in links:
             if link.id:
-                rel = self._rels.get(link.id)
+                rel = by_id.get(link.id)
+                if rel is None:
+                    rel = self._rels.get(link.id)  # (RelationshipList's KeyError)
                 link.target = rel.Target
             if ":" in link.ref:
                 min_col, min_row, max_col, max_row = range_boundaries(link.ref)
@@ -1016,10 +1103,13 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
         merge = self._merge
         cell_cls = self._ext_cell_cls()
         extra = self._ext_extra_slots()
-        if merge is not None and not values_only:
-            merge.compute_styles()  # (cached for the whole sheet)
+        covered = ()
+        if merge is not None:
+            covered = merge.covered_starts()
+            if not values_only:
+                merge.compute_styles()  # (cached for the whole sheet)
         # merged ranges sorted by start row, swept as rows advance
-        pending = list(merge.by_row) if merge is not None else []
+        pending = merge.by_row if merge is not None else ()
         pi = 0
         active = []
         row_idx = min_row - 1
@@ -1065,7 +1155,7 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
                     k = col - min_col
                     # the top-left cell stays a cell unless another
                     # (overlapping) range covers it
-                    if (row_idx, col) == (rng.min_row, rng.min_col) and merge.merged_coord(row_idx, col) is None:
+                    if (row_idx, col) == (rng.min_row, rng.min_col) and i not in covered:
                         if values_only:
                             continue
                         shadow = merge.spec(i, row_idx, col)
@@ -1133,7 +1223,7 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
                 fv = cell.formula if cell.formula is not None else cell.cached_value
                 dv = cell.cached_value
             for _how, link in links:
-                link = copy(link)
+                link = _copy_link(link)
                 link.ref = cell.coordinate
                 cell.hyperlink = link
                 if cell._value is None:
@@ -1153,6 +1243,34 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
             comment.bind(cell)
             cell.comment = comment
         return cell
+
+
+def _clone_range(cr, cls):
+    """`cls(cr.coord)` for a parsed CellRange `cr`, without validating its
+    values again (descriptors keep them in the instance __dict__)"""
+    c = cls.__new__(cls)
+    c.__dict__.update(cr.__dict__)
+    return c
+
+
+def _copy_link(link):
+    """
+    `copy(link)` of a hyperlink read from the file: Serialisable.__copy__
+    serialises the persisted attributes to XML and back and copies the
+    others; all of them are strings read from XML (or None), which the round
+    trip returns unchanged
+    """
+    c = link.__class__.__new__(link.__class__)
+    c.__dict__.update(link.__dict__)
+    return c
+
+
+def _rels_by_id(rels):
+    """{Id: relationship} - the first of each Id, as RelationshipList.get"""
+    out = {}
+    for r in rels:
+        out.setdefault(r.Id, r)
+    return out
 
 
 def _record(base, min_row, min_col, coords, out):
