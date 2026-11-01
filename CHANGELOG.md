@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 * Performance (extended streaming): sheets with many merged cells,
   hyperlinks or both. Each merged range ran openpyxl's merge logic on a new
