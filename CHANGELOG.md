@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 Streaming (`openrsxl.extended`, read-only) options to replace full mode
 without changing results or speed; none is part of `read_all`, all default
