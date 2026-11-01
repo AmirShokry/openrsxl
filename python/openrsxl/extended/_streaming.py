@@ -1164,6 +1164,9 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
         )
         data_only = self.parent.data_only
         rows = WorkSheetParser(src, self._shared_strings, data_only=data_only, **kw).parse()
+        if self.__dict__.get("_replayed", False):
+            # a complete pass reported the sheet's warnings (see _native_rows)
+            rows = _quiet(rows)
         if self._ext.formula_and_value:
             # the other reading of the same rows, warnings are reported once
             other = WorkSheetParser(self._get_source(), self._shared_strings, data_only=not data_only, **kw).parse()
@@ -1180,6 +1183,7 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
                 continue
             idx, cells = prim
             yield idx, self._ext_get_row(cells, form, val, min_col, max_col, values_only, filler, cell_cls, extra)
+        self._replayed = True
 
     def _ext_get_row(self, row, form, val, min_col, max_col, values_only, filler, cell_cls, extra):
         if not row and not max_col:
