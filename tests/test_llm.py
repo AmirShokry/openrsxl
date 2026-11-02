@@ -1039,6 +1039,13 @@ def filter_book():
     return wb
 
 
+def _range_cells(ref):
+    from openpyxl.utils.cell import range_boundaries
+
+    c1, r1, c2, r2 = range_boundaries(ref)
+    return [(r, c) for r in range(r1, r2 + 1) for c in range(c1, c2 + 1)]
+
+
 @pytest.mark.parametrize("encoding", ENCODINGS)
 @pytest.mark.parametrize("skip_hidden,area", [(True, False), (False, True), (True, True)])
 def test_filters(tmp_path, encoding, skip_hidden, area):
@@ -1056,8 +1063,9 @@ def test_filters(tmp_path, encoding, skip_hidden, area):
             for attr in ("values", "data_types", "formulas", "style_ids", "hyperlinks", "comments"):
                 want = {k: v for k, v in getattr(f, attr).items() if keep(k)}
                 assert _norm(getattr(s, attr)) == _norm(want), (s.name, attr)
-            # metadata other than per-cell features is kept whole
-            assert s.merged == f.merged and s.row_dimensions == f.row_dimensions
+            # merged ranges: those holding a kept cell; other metadata whole
+            want = [m for m in f.merged if any(keep(c) for c in _range_cells(m))]
+            assert s.merged == want and s.row_dimensions == f.row_dimensions
     sales = decompress(doc)["Sales"]
     expected = (["skip=hidden"] if skip_hidden else []) + (["area=A1:E20,A40:D45+titles:1:2,A:A"] if area else [])
     assert sales.filter == expected
@@ -1184,8 +1192,9 @@ def test_selection(tmp_path, encoding, case):
             for attr in ("values", "data_types", "formulas", "style_ids", "hyperlinks", "comments"):
                 want = {k: v for k, v in getattr(f, attr).items() if keep(k)}
                 assert _norm(getattr(s, attr)) == _norm(want), (case, s.name, attr)
-            # range metadata is kept whole
-            assert s.merged == f.merged and s.row_dimensions == f.row_dimensions
+            # merged ranges: those holding a selected cell; other metadata whole
+            want = [m for m in f.merged if any(keep(c) for c in _range_cells(m))]
+            assert s.merged == want and s.row_dimensions == f.row_dimensions
     if header is not None:
         assert decompress(doc)["Sales"].filter == header
     assert "Filtered sheets:" in doc.legend
@@ -1389,3 +1398,123 @@ def test_upstream_files(path):
 @pytest.mark.parametrize("path", [p for p in os.environ.get("OPENRSXL_LLM_FILES", "").split(";") if p])
 def test_external_files(path):
     check(path)
+
+
+# -- 0.4.3: dates, clipped merges, style keys, legend parts, cite_cells --------
+
+
+def _agent_book():
+    from openpyxl.styles import Color
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Disposals"
+    ws["B1"] = "Entity No"
+    ws["C1"] = "Full legal name"
+    ws["B5"] = "Johnny Wilde Co-investment 1 LP"
+    ws["C4"] = "Income Tax Allocations"
+    ws["D5"] = datetime.datetime(2025, 4, 6)  # a date cell: midnight datetime
+    ws["D6"] = datetime.datetime(2025, 4, 6, 13, 45)
+    ws["D8"] = "2025-04-06"  # text that reads like a date
+    for r in range(10, 40):
+        for c in range(1, 9):
+            ws.cell(r, c, r * c if (r + c) % 3 else None)
+    ws["A1"].font = Font(b=True, name="Arial")
+    ws["A2"].font = Font(b=True, name="Calibri", family=2, scheme="minor")
+    ws["A3"].font = Font(i=True, color=Color(theme=1))
+    ws["A4"].fill = PatternFill("solid", fgColor=Color(theme=0, tint=-0.1499984740745262))
+    ws["A5"].fill = PatternFill("solid", fgColor=Color(indexed=10))
+    for r in range(1, 60, 3):
+        ws.merge_cells(f"K{r}:L{r + 1}")
+    return wb
+
+
+def test_midnight_datetimes_keep_their_time(tmp_path):
+    p = save(_agent_book(), tmp_path)
+    doc = llm.compress_workbook(p, include="values", encoding="grid")
+    text = doc["Disposals"]["values"].text
+    assert "2025-04-06 00:00:00" in text and "2025-04-06 13:45:00" in text
+    assert '"2025-04-06"' in text
+    v = decompress(doc)["Disposals"].values
+    assert v[(5, 4)] == datetime.datetime(2025, 4, 6) and type(v[(5, 4)]) is datetime.datetime
+    assert v[(8, 4)] == "2025-04-06"
+    # a date object (openpyxl reads none from cells) keeps its own token
+    assert llm.parse_token("@date:2025-04-06") == (datetime.date(2025, 4, 6), "d")
+    # documents written before (bare date = midnight datetime) still decode
+    assert llm.parse_token("2025-04-06") == (datetime.datetime(2025, 4, 6), "d")
+    assert "00:00:00 at" in doc.legend and "2024-01-05 date;" not in doc.legend
+
+
+def test_merged_ranges_clipped_to_the_selection(tmp_path):
+    p = save(_agent_book(), tmp_path)
+    whole = llm.compress_workbook(p, include="merged", legend=False)["Disposals"]["merged"].text
+    assert len(whole.strip().split(",")) == 20
+    part = llm.compress_workbook(p, include="merged", ranges="A1:K7", legend=False)["Disposals"]["merged"].text
+    assert sorted(part.strip().split(",")) == ["K1:L2", "K4:L5", "K7:L8"]
+    assert "merged" not in llm.compress_workbook(p, include="merged", ranges="A1:C9")["Disposals"].sections
+
+
+def test_style_keys(tmp_path):
+    p = save(_agent_book(), tmp_path)
+    full = llm.compress_workbook(p, include="styles")
+    doc = llm.compress_workbook(p, include="styles", style_keys=["font.b", "font.i", "fill"])
+    table = doc.styles.text()
+    assert "name:" not in table and "scheme" not in table and "protection" not in table and "numFmt" not in table
+    assert len(doc.styles.cells) < len(full.styles.cells)  # A1 / A2: one style (bold)
+    smap = dict(line.split("=") for line in doc["Disposals"]["styles"].text.splitlines())
+    assert smap["A1"] == smap["A2"]
+    assert "Only these style keys are written: font.b,font.i,fill" in doc.legend
+    decompress(doc)  # still a valid document
+    with pytest.raises(ValueError, match="unknown key"):
+        llm.compress_workbook(p, include="styles", style_keys=["colour"])
+    with pytest.raises(ValueError, match="has no part"):
+        llm.compress_workbook(p, include="styles", style_keys=["numFmt.code"])
+    # without style_keys: the lossless table, unchanged
+    assert full.styles.text() == llm.compress_workbook(p, include="styles").styles.text()
+
+
+def test_resolve_colors(tmp_path):
+    p = save(_agent_book(), tmp_path)
+    doc = llm.compress_workbook(p, include="styles", resolve_colors=True)
+    t = doc.styles.text()
+    assert "theme=" not in t and "indexed=" not in t and "tint=" not in t
+    assert "rgb=FFD9D9D9" in t  # white (lt1), darker 15 %
+    assert "rgb=FF000000" in t  # dk1 (text) of the default theme
+    assert "rgb=FFFF0000" in t  # indexed 10: red
+    assert "written as rgb=FFRRGGBB" in doc.legend
+
+
+def test_legend_of_a_document(tmp_path):
+    p = save(_agent_book(), tmp_path)
+    with_legend = llm.compress_workbook(p, include=["values", "styles", "merged"])
+    without = llm.compress_workbook(p, include=["values", "styles", "merged"], legend=False)
+    assert without.legend is None and "## legend" not in without.text()
+    assert without.legend_parts == with_legend.legend_parts and "merged" in without.legend_parts
+    assert llm.legend(without) == with_legend.legend == llm.legend(with_legend.legend_parts)
+    keyed = llm.compress_workbook(p, include="styles", style_keys="font", legend=False)
+    assert "Only these style keys" in llm.legend(keyed)
+
+
+def test_cite_cells(tmp_path):
+    p = save(_agent_book(), tmp_path)
+    plain = llm.compress_workbook(p, include=["values", "formulas"], encoding="grid")
+    cite = llm.compress_workbook(p, include=["values", "formulas"], cite_cells=True)
+    grid = llm.compress_workbook(p, include=["values", "formulas"], encoding="grid", cite_cells=True)
+    # every grid field names its column, every line its row
+    for line in grid["Disposals"]["values"].text.splitlines():
+        row, _, rest = line.partition(":")
+        assert row.isdigit(), line
+        for field in rest.split("|"):
+            assert field == "" or (field.split("=", 1)[0].isalpha() and "=" in field), line
+    assert "5:B=Johnny Wilde Co-investment 1 LP" in grid["Disposals"]["values"].text
+    assert "every field is written COL=v" in grid.legend
+    # index when it costs at most 1.3 x the grid; never hybrid
+    a = cite["Disposals"].analysis
+    assert a["encoding"] in ("index", "grid")
+    if a["encoding"] == "grid":
+        assert a["index_tokens"] is None or a["index_tokens"] > 1.3 * a["grid_tokens"]
+    # lossless as always
+    for d in (cite, grid):
+        got = decompress(d.text())["Disposals"]
+        ref = decompress(plain)["Disposals"]
+        assert _norm(got.values) == _norm(ref.values) and got.formulas == ref.formulas

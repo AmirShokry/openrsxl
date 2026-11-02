@@ -3,6 +3,7 @@
 import bisect
 import json
 import os
+import re
 import warnings
 from collections import OrderedDict
 
@@ -18,7 +19,10 @@ from openrsxl.xml.constants import ARC_CORE
 from openrsxl.xml.functions import tostring
 
 from . import _cx
-from ._legend import FORMAT, legend
+from ._legend import FORMAT
+from ._legend import ORDER as LEGEND_ORDER
+from ._legend import _wanted as _legend_wanted
+from ._legend import legend
 from ._model import SHEET_OBJECTS, column_dimension_items, read_object, row_dimension_items
 
 #: sections of a sheet, in document order
@@ -96,6 +100,25 @@ class CellFilter:
         if self.areas is None:
             return True
         return any(r1 <= row <= r2 and c1 <= col <= c2 for r1, c1, r2, c2 in self.areas)
+
+    @staticmethod
+    def _free(ranges, a, b):
+        """some x in [a, b] is in none of the (sorted, disjoint) ranges"""
+        x = a
+        for s, e in ranges:
+            if e < x:
+                continue
+            if s > x:
+                return True
+            x = e + 1
+            if x > b:
+                return False
+        return x <= b
+
+    def intersects(self, r1, c1, r2, c2):
+        """the rectangle holds at least one kept cell"""
+        rects = [(r1, c1, r2, c2)] if self.areas is None else _intersect([(r1, c1, r2, c2)], self.areas)
+        return any(self._free(self.skip_rows, a[0], a[2]) and self._free(self.skip_cols, a[1], a[3]) for a in rects)
 
     def options(self):
         """options of the Rust SheetEncoder"""
@@ -518,6 +541,11 @@ class CompressedWorkbook:
         self.sheets = []
         self.files = {}
         self.in_memory = True
+        # the legend parts the document uses (also with legend=False):
+        # ``legend(doc)`` / ``legend(doc.legend_parts)`` gives its legend, to
+        # send once for several documents
+        self.legend_parts = ()
+        self.legend_options = {}
 
     def __getitem__(self, name):
         for s in self.sheets:
@@ -756,12 +784,16 @@ class StyleTable:
     """
 
     _PARTS = ("font", "fill", "border")
+    _KEYS = (("fontId", "font"), ("fillId", "fill"), ("borderId", "border"))
 
     def __init__(self, parts, cells):
         self.parts = parts  # {(kind, id): line}, in document order
         self.cells = cells  # {style id: (line, (fontId, fillId, borderId))}
+        self.canonical = {}  # style id -> the id written (style_keys)
 
     def text(self, ids=None):
+        if ids is not None:
+            ids = {self.canonical.get(i, i) for i in ids}
         ids = sorted(self.cells) if ids is None else sorted((set(ids) | {0}) & set(self.cells))
         need = {(kind, self.cells[s][1][k]) for s in ids for k, kind in enumerate(self._PARTS)}
         lines = [line for key, line in self.parts.items() if key in need]
@@ -772,51 +804,286 @@ class StyleTable:
         return f"<StyleTable {len(self.cells)} styles>"
 
 
-def _style_table(wb, used):
-    """StyleTable of the cell styles `used` (and s0)"""
+#: style_keys: the keys of a style and the sub-keys each one accepts
+#: (children of <font> / <border>, of <patternFill>, attributes of
+#: <alignment> / <protection>); None: any name
+STYLE_KEYS = {
+    "font": None,
+    "fill": ("patternType", "fgColor", "bgColor", "gradientFill"),
+    "border": None,
+    "numFmt": (),
+    "alignment": None,
+    "protection": None,
+    "quotePrefix": (),
+    "pivotButton": (),
+    "style": (),
+}
+
+
+def _style_keys(spec):
+    """{key: None (all of it) or set of sub-keys} of a style_keys option"""
+    if spec is None:
+        return None
+    if isinstance(spec, str):
+        spec = [spec]
+    out = {}
+    for item in spec:
+        key, _, subkey = str(item).partition(".")
+        if key not in STYLE_KEYS:
+            raise ValueError(f"style_keys: unknown key {item!r} (keys: {', '.join(STYLE_KEYS)})")
+        allowed = STYLE_KEYS[key]
+        if subkey and allowed is not None and subkey not in allowed:
+            raise ValueError(
+                f"style_keys: {key!r} has no part {subkey!r}" + (f" ({', '.join(allowed)})" if allowed else "")
+            )
+        if not subkey:
+            out[key] = None
+        elif key not in out or out[key] is not None:
+            out.setdefault(key, set()).add(subkey)
+    return out
+
+
+def _local(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def _keep_children(el, names):
+    for child in list(el):
+        if _local(child.tag) not in names:
+            el.remove(child)
+
+
+def _filtered(kind, el, keys):
+    """the part / element `el` with only the selected sub-keys"""
+    sub = keys.get(kind)
+    if sub is None:
+        return el
+    if kind in ("font", "border"):
+        _keep_children(el, sub)
+        el.attrib.clear()
+    elif kind == "fill":
+        for child in list(el):
+            name = _local(child.tag)
+            if name == "gradientFill":
+                if "gradientFill" not in sub:
+                    el.remove(child)
+                continue
+            if name == "patternFill":
+                if "patternType" not in sub:
+                    child.attrib.pop("patternType", None)
+                _keep_children(child, sub)
+    else:  # alignment, protection: attributes
+        for a in list(el.attrib):
+            if a not in sub:
+                del el.attrib[a]
+    return el
+
+
+# the legacy indexed palette (openpyxl's COLOR_INDEX)
+def _indexed(i):
+    from openrsxl.styles.colors import COLOR_INDEX
+
+    return COLOR_INDEX[i] if 0 <= i < len(COLOR_INDEX) else None
+
+
+def _theme_colors(wb):
+    """RGB of the theme colour indexes (0: lt1, 1: dk1, 2: lt2, 3: dk2, then
+    accent1-6, hlink, folHlink, as Excel numbers them)"""
+    theme = getattr(wb, "loaded_theme", None)
+    if not theme:
+        return []
+    from openrsxl.xml.functions import fromstring
+
+    try:
+        root = fromstring(theme)
+    except Exception:  # pragma: no cover - unreadable theme
+        return []
+    scheme = None
+    for el in root.iter():
+        if _local(el.tag) == "clrScheme":
+            scheme = el
+            break
+    if scheme is None:
+        return []
+    by_name = {}
+    for el in scheme:
+        rgb = None
+        for c in el:
+            if _local(c.tag) == "srgbClr":
+                rgb = c.get("val")
+            elif _local(c.tag) == "sysClr":
+                rgb = c.get("lastClr")
+        by_name[_local(el.tag)] = rgb
+    order = ["lt1", "dk1", "lt2", "dk2"] + [f"accent{i}" for i in range(1, 7)] + ["hlink", "folHlink"]
+    return [by_name.get(n) for n in order]
+
+
+def _tinted(rgb, tint):
+    """Excel's tint: the lightness of `rgb` (RRGGBB) moved by `tint`"""
+    import colorsys
+
+    r, g, b = (int(rgb[i : i + 2], 16) / 255 for i in (0, 2, 4))
+    h, lum, s = colorsys.rgb_to_hls(r, g, b)
+    lum = lum * (1 + tint) if tint < 0 else lum * (1 - tint) + tint
+    r, g, b = colorsys.hls_to_rgb(h, min(1.0, max(0.0, lum)), s)
+    return "".join(f"{round(x * 255):02X}" for x in (r, g, b))
+
+
+def _resolve_colors(el, theme):
+    """theme / indexed colours (with their tint) as rgb=FFRRGGBB"""
+    for c in el.iter():
+        a = c.attrib
+        if "theme" not in a and "indexed" not in a and "tint" not in a:
+            continue
+        rgb = None
+        if "theme" in a:
+            i = int(a["theme"])
+            rgb = theme[i] if 0 <= i < len(theme) else None
+        elif "indexed" in a:
+            rgb = _indexed(int(a["indexed"]))
+            rgb = rgb[-6:] if rgb else None
+        elif "rgb" in a:
+            rgb = a["rgb"][-6:]
+        if rgb is None:
+            continue
+        tint = float(a.get("tint", 0) or 0)
+        if tint:
+            rgb = _tinted(rgb, tint)
+        for k in ("theme", "indexed", "tint", "rgb"):
+            a.pop(k, None)
+        a["rgb"] = "FF" + rgb.upper()
+    return el
+
+
+def _style_table(wb, used, keys=None, resolve_colors=False):
+    """
+    StyleTable of the cell styles `used` (and s0). `keys` (style_keys):
+    only these keys / sub-keys, styles and parts that become equal are
+    written once (``StyleTable.canonical`` maps every style id to the one
+    written); `resolve_colors`: theme / indexed colours as RGB.
+    """
     styles = wb._cell_styles
     used = sorted(set(used) | {0})
     used = [i for i in used if i < len(styles)]
-    s0 = styles[0]
+    theme = _theme_colors(wb) if resolve_colors else None
+
+    def tree(kind, obj):
+        el = obj.to_tree()
+        if keys is not None:
+            el = _filtered(kind, el, keys)
+        if theme is not None:
+            el = _resolve_colors(el, theme)
+        return el
+
+    def wanted(key):
+        return keys is None or key in keys
+
     parts = OrderedDict()
+    part_id = {}  # (kind, id) -> the id written for that part
     for attr, pool, prefix, kind in (
         ("fontId", wb._fonts, "f", "font"),
         ("fillId", wb._fills, "p", "fill"),
         ("borderId", wb._borders, "b", "border"),
     ):
+        if not wanted(kind):
+            continue
+        seen = {}
         for i in sorted({getattr(styles[s], attr) for s in used}):
-            items = _cx.encode_items(pool[i].to_tree())
+            items = _cx.encode_items(tree(kind, pool[i]))
+            if keys is not None and items in seen:
+                part_id[(kind, i)] = seen[items]
+                continue
+            seen[items] = i
+            part_id[(kind, i)] = i
             parts[(kind, i)] = f"{kind} {prefix}{i}: {items}" if items else f"{kind} {prefix}{i}:"
     names = wb._named_styles.names
-    cells = OrderedDict()
-    for s in used:
+
+    def values(s):
+        """the written keys of style s: [(key, text, compared)]: without
+        style_keys a key is compared with s0 by its id (as always), with
+        them by its text"""
         sa = styles[s]
-        items = []
-        first = s == 0
+        out = []
+
+        def add(key, text, raw):
+            out.append((key, text, raw if keys is None else text))
+
         for attr, prefix, key in (("fontId", "f", "font"), ("fillId", "p", "fill"), ("borderId", "b", "border")):
-            if first or getattr(sa, attr) != getattr(s0, attr):
-                items.append(f"{key}={prefix}{getattr(sa, attr)}")
-        if first or sa.numFmtId != s0.numFmtId:
-            items.append(f"numFmt={_cx.scalar(_number_format(wb, sa.numFmtId))}")
-        if first or sa.alignmentId != s0.alignmentId:
-            items.append(_cx.encode(wb._alignments[sa.alignmentId].to_tree()))
-        if first or sa.protectionId != s0.protectionId:
-            items.append(_cx.encode(wb._protections[sa.protectionId].to_tree()))
+            if wanted(key):
+                add(key, f"{key}={prefix}{part_id[(key, getattr(sa, attr))]}", getattr(sa, attr))
+        if wanted("numFmt"):
+            add("numFmt", f"numFmt={_cx.scalar(_number_format(wb, sa.numFmtId))}", sa.numFmtId)
+        if wanted("alignment"):
+            add("alignment", _cx.encode(tree("alignment", wb._alignments[sa.alignmentId])), sa.alignmentId)
+        if wanted("protection"):
+            add("protection", _cx.encode(tree("protection", wb._protections[sa.protectionId])), sa.protectionId)
         for attr in ("quotePrefix", "pivotButton"):
-            v = getattr(sa, attr)
-            if (first and v) or (not first and v != getattr(s0, attr)):
-                items.append(f"{attr}={int(v)}")
-        if first or sa.xfId != s0.xfId:
+            if wanted(attr):
+                add(attr, f"{attr}={int(getattr(sa, attr))}", getattr(sa, attr))
+        if wanted("style"):
             if sa.xfId < len(names):
-                items.append(f"style={_cx.scalar(names[sa.xfId])}")
+                add("style", f"style={_cx.scalar(names[sa.xfId])}", sa.xfId)
             else:
-                items.append(f"xfId={sa.xfId}")
-        cells[s] = (f"s{s}: " + " ".join(items), (sa.fontId, sa.fillId, sa.borderId))
-    return StyleTable(parts, cells)
+                add("style", f"xfId={sa.xfId}", sa.xfId)
+        return out
+
+    base = {k: c for k, _, c in values(0)}
+    cells = OrderedDict()
+    canonical = {}
+    seen = {}
+    for s in used:
+        vals = values(s)
+        if s == 0:
+            # s0: every key (quotePrefix / pivotButton only when set)
+            items = [v for k, v, _ in vals if k not in ("quotePrefix", "pivotButton") or v.endswith("=1")]
+        else:
+            items = [v for k, v, c in vals if c != base.get(k)]
+        if keys is not None:
+            sig = tuple(v for _, v, _ in vals)
+            if sig in seen:
+                canonical[s] = seen[sig]
+                continue
+            seen[sig] = s
+        canonical[s] = s
+        sa = styles[s]
+        ids = tuple(part_id.get((kind, getattr(sa, attr))) for attr, kind in StyleTable._KEYS)
+        cells[s] = (f"s{s}: " + " ".join(items), ids)
+    table = StyleTable(parts, cells)
+    table.canonical = canonical
+    return table
 
 
-def _merged_section(ws):
-    return ",".join(str(r.coord) for r in ws.merged_cells.ranges) + "\n" if ws.merged_cells.ranges else ""
+_STYLE_REF = re.compile(r"=s(\d+)$")
+_DIM_STYLE = re.compile(r"\bs=s(\d+)\b")
+
+
+def _style_keys_text(keys):
+    out = []
+    for k, sub in keys.items():
+        out.extend([k] if sub is None else [f"{k}.{s}" for s in sorted(sub)])
+    return ",".join(out)
+
+
+def _remap_style_map(text, canonical):
+    """a sheet's ### styles with the written style ids (lines of s0 dropped)"""
+    out = []
+    for line in text.splitlines():
+        m = _STYLE_REF.search(line)
+        if m:
+            c = canonical.get(int(m.group(1)), int(m.group(1)))
+            if c == 0:
+                continue
+            line = line[: m.start()] + f"=s{c}"
+        out.append(line + "\n")
+    return "".join(out)
+
+
+def _merged_section(ws, cell_filter=None):
+    """the merged ranges; with a cell filter, those holding a kept cell"""
+    ranges = ws.merged_cells.ranges
+    if cell_filter is not None:
+        ranges = [r for r in ranges if cell_filter.intersects(r.min_row, r.min_col, r.max_row, r.max_col)]
+    return ",".join(str(r.coord) for r in ranges) + "\n" if ranges else ""
 
 
 def _per_cell(ws, key, cell_filter=None):
@@ -1242,6 +1509,9 @@ _OPTIONS = dict(
     rows=None,
     columns=None,
     ranges=None,
+    style_keys=None,
+    resolve_colors=False,
+    cite_cells=False,
 )
 
 
@@ -1286,8 +1556,15 @@ class _Job:
         self.encoding = o["encoding"]
         self.legend = o["legend"]
         self.tuning = {k: o[k] for k in ("jump_gap", "runs", "row_anchor", "ditto", "index_limit")}
+        self.tuning["jump_gap"] = max(1, int(self.tuning["jump_gap"]))  # (as before: at least 1)
+        if o["cite_cells"]:
+            # every cell named: the inverted index unless it costs more than
+            # 1.3 x the grid, never hybrid; a grid writes COL=v for every
+            # field and ROW: on every line (no runs, no ditto)
+            self.tuning.update(jump_gap=0, runs=False, ditto=False, row_anchor=1, index_ratio=1.3, hybrid_ratio=0.0)
         self.scope = {k: bool(o[k]) for k in ("skip_hidden", "skip_hidden_sheets", "print_area_only")}
         self.scope["selection"] = Selection(o["rows"], o["columns"], o["ranges"])
+        self.style = dict(keys=_style_keys(o["style_keys"]), resolve_colors=bool(o["resolve_colors"]))
         flags = _flags(self.sections)
         if o["skip_hidden"]:
             flags["read_dimensions"] = True  # hidden rows / columns
@@ -1322,6 +1599,7 @@ class _Job:
             self.legend,
             self.tuning,
             self.scope,
+            self.style,
         )
 
     def close(self):
@@ -1371,6 +1649,9 @@ def compress_workbook(
     rows=None,
     columns=None,
     ranges=None,
+    style_keys=None,
+    resolve_colors=False,
+    cite_cells=False,
 ):
     """Compress a workbook - or the worksheets named in ``sheets`` (a name
     or a list of names) - into an LLM readable, lossless text document
@@ -1411,6 +1692,9 @@ def compress_sheets(
     rows=None,
     columns=None,
     ranges=None,
+    style_keys=None,
+    resolve_colors=False,
+    cite_cells=False,
 ):
     """
     Compress one worksheet at a time: yields ``(sheet name,
@@ -1440,9 +1724,21 @@ def compress_sheets(
 
 
 def _compress(
-    wb, filename, sections, sheet_names, encoding, keep, text_path, json_path, want_legend, tuning, scope=None
+    wb,
+    filename,
+    sections,
+    sheet_names,
+    encoding,
+    keep,
+    text_path,
+    json_path,
+    want_legend,
+    tuning,
+    scope=None,
+    style=None,
 ):
     scope = scope or {}
+    style = style or {}
     secset = set(sections)
     cell_secs = secset & {"values", "formulas", "styles"}
     worksheets = _select(wb, sheet_names, scope)
@@ -1482,7 +1778,7 @@ def _compress(
             texts["formulas"] = p1["formulas"]
         meta = OrderedDict()
         if "merged" in secset:
-            meta["merged"] = _merged_section(ws)
+            meta["merged"] = _merged_section(ws, cf if cf.active else None)
         if "hyperlinks" in secset:
             meta["hyperlinks"] = _hyperlinks_section(ws, cf if cf.active else None)
         if "comments" in secset:
@@ -1522,12 +1818,34 @@ def _compress(
         wbsec = Section("workbook", t, tokens=estimate_tokens(t), size=len(t))
         parts.add("workbook")
     table = None
+    style_keys = style.get("keys")
     if "styles" in secset and jobs:
-        table = _style_table(wb, set().union(*(job[6] for job in jobs)))
+        table = _style_table(wb, set().union(*(job[6] for job in jobs)), style_keys, style.get("resolve_colors", False))
         parts.add("styles")
-    legend_text = legend(parts) if want_legend else None
+        if any(k != v for k, v in table.canonical.items()):
+            # style_keys: styles equal on the selected keys are written once
+            canonical = table.canonical
+            for k, job in enumerate(jobs):
+                texts = job[5]
+                if texts.get("styles"):
+                    texts["styles"] = _remap_style_map(texts["styles"], canonical)
+                if texts.get("dimensions"):
+                    texts["dimensions"] = _DIM_STYLE.sub(
+                        lambda m: f"s=s{canonical.get(int(m.group(1)), int(m.group(1)))}", texts["dimensions"]
+                    )
+                jobs[k] = job[:6] + ({canonical.get(s, s) for s in job[6]},) + job[7:]
+    legend_kw = {}
+    if tuning.get("jump_gap") == 0:
+        legend_kw["cite_cells"] = True
+    if table is not None and style_keys is not None:
+        legend_kw["style_keys"] = _style_keys_text(style_keys)
+    if table is not None and style.get("resolve_colors"):
+        legend_kw["resolved_colors"] = True
+    legend_text = legend(parts, **legend_kw) if want_legend else None
     source = os.path.basename(os.fspath(filename)) if isinstance(filename, (str, os.PathLike)) else None
     result = CompressedWorkbook(source, sections, legend_text, wbsec, table)
+    result.legend_parts = tuple(p for p in LEGEND_ORDER if p in _legend_wanted(parts))
+    result.legend_options = legend_kw
     result.in_memory = keep
 
     out = _Out(text_path, json_path)

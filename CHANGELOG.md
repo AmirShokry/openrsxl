@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+`openrsxl.extended.llm`:
+
+* Fixed: a datetime at midnight was written as a bare date
+  (`2025-04-06`); every datetime now keeps its time
+  (`2025-04-06 00:00:00`), as openpyxl reads date cells. Bare dates in
+  older documents still decode as midnight datetimes.
+* With cell filters (`rows` / `columns` / `ranges`, `skip_hidden`,
+  `print_area_only`), `merged` lists only the merged ranges that hold a
+  kept cell (it listed all of them: 301 instead of 81 on a 1,855-token
+  section of a real workbook).
+* `style_keys=[...]`: write only these style keys or parts (`font.b`,
+  `font.sz`, `font.color`, `fill`, `border`, `numFmt`,
+  `alignment.horizontal` ...); styles and parts equal on them are written
+  once. `resolve_colors=True`: theme / indexed colours (with tint) as
+  `rgb=FFRRGGBB`. Both opt-in (not lossless); the legend says so.
+* `cite_cells=True`: for a model that must name each value's cell - the
+  `index` encoding unless it costs more than 1.3 x the grid, never
+  `hybrid`, and grids with `COL=v` on every field and `ROW:` on every line
+  (models were seen to shift positional grid fields by a column, even
+  after explicit jumps). Still lossless.
+* `doc.legend_parts` (also with `legend=False`) and `legend(doc)`: the
+  legend of a document, to send it once for several documents.
+
 ## 0.4.2
 
 * `random_access=True`: `iter_rows` with explicit bounds gives every row of

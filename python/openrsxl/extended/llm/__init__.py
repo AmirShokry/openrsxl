@@ -119,8 +119,9 @@ cells that remain (``analysis["skipped_cells"]`` counts the others). A
 filtered sheet says so in its header - ``## sheet 1 "S" dim=A1:F40
 skip=hidden area=A1:F40+titles:1:2`` - (JSON: ``"filter"``; decoded:
 ``DecodedSheet.filter``) and the legend explains it: the left-out cells are
-not empty, only not shown. Range metadata (merged cells, dimensions,
-validations, conditional formats, tables, sheet settings) is kept whole.
+not empty, only not shown. ``merged`` lists only the merged ranges holding
+a kept cell; the other range metadata (dimensions, validations,
+conditional formats, tables, sheet settings) is kept whole.
 Without filters, or when a flag finds nothing to leave out, the document is
 exactly the lossless one.
 
@@ -163,8 +164,8 @@ complete grammar - ``LEGEND`` below, and docs/LLM_ENCODING.md - in short:
   section (``### values grid start=A``: the encoding and the grid's first
   column).
 * Value tokens: ``12`` integer, ``-3.5`` / ``1e-05`` float, ``TRUE`` /
-  ``FALSE``, ``#N/A`` (``#``...) error, ``2024-01-05`` date (midnight),
-  ``2024-01-05 13:45:00`` datetime, ``13:45:00`` time, ``"..."`` text in
+  ``FALSE``, ``#N/A`` (``#``...) error, ``2024-01-05 13:45:00`` datetime
+  (``00:00:00`` at midnight: every date cell is a datetime), ``13:45:00`` time, ``"..."`` text in
   JSON syntax (only when bare text would be ambiguous), ``@date:``,
   ``@td:`` (duration), ``@err:"..."``, ``@float:inf``; anything else is
   text exactly as written.
@@ -198,7 +199,8 @@ Functions
 encoding="auto", output="memory", path=None, legend=True, jump_gap=4,
 runs=True, row_anchor=10, ditto=True, index_limit=64 MiB, keep_links=True,
 skip_hidden=False, skip_hidden_sheets=False, print_area_only=False,
-rows=None, columns=None, ranges=None)``
+rows=None, columns=None, ranges=None, style_keys=None,
+resolve_colors=False, cite_cells=False)``
     -> ``CompressedWorkbook``. ``sheets``: the worksheet(s) to compress, a
     name or a list of names (default: all; written in workbook order).
     The other sheets are not read. ``jump_gap``: empty cells after which the grid
@@ -210,6 +212,14 @@ rows=None, columns=None, ranges=None)``
     sheet has too many distinct values for an index to win: grid).
     ``skip_hidden`` / ``skip_hidden_sheets`` / ``print_area_only`` /
     ``rows`` / ``columns`` / ``ranges``: see Filters.
+    ``cite_cells``: for a model that must name each value's cell - the
+    index unless it costs more than 1.3 x the grid, and grids writing
+    ``COL=v`` for every field and ``ROW:`` on every line (still lossless).
+    ``style_keys``: only these style keys (``"font"``, ``"font.b"``,
+    ``"fill"``, ``"numFmt"``, ``"alignment.horizontal"`` ...; not lossless).
+    ``resolve_colors``: theme / indexed colours as ``rgb=FFRRGGBB``.
+    ``doc.legend_parts`` / ``legend(doc)``: the document's legend, also
+    with ``legend=False`` (to send it once for several documents).
 ``compress_sheets(filename, *, sheets=None, ...)``
     the same options; yields ``(sheet name, CompressedWorkbook)`` one
     worksheet at a time, in workbook order: the workbook is opened once and

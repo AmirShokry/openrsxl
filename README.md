@@ -386,14 +386,23 @@ A1:E1=s1
   out hidden rows and columns, `skip_hidden_sheets=True` hidden sheets,
   `print_area_only=True` everything outside the print area (and print
   titles), `rows="1:100,200:300"` / `columns="A:D,F"` /
-  `ranges=["A1:D20", "F5:H9"]` keep only those segments (per sheet with a dict); a filtered sheet is
-  marked as such in the document.
+  `ranges=["A1:D20", "F5:H9"]` keep only those segments (per sheet with a dict; `merged` then
+  lists only the merged ranges they touch); a filtered sheet is marked as such in the document.
+  `style_keys=["font.b", "fill", "numFmt", ...]` writes only those style keys and
+  `resolve_colors=True` turns theme / indexed colours into RGB.
+* **Built for citing cells** - `cite_cells=True` names every value's cell: the
+  `index` encoding unless it costs more than 1.3 x the grid, otherwise a grid
+  with `COL=v` on every field and a row label on every line (still lossless).
+  Models copying addresses from a positional grid were seen to shift values by a
+  column; this leaves nothing to count.
 * **Cheapest form by default** - the text document (`doc.text()`,
   `output="text"`). JSON is opt-in (`output="json"`, `doc.to_json()`) for
   programs: the same content costs 1-2 % more tokens on large workbooks and
   about 50 % more on small ones.
 * **Self-describing** - every document starts with a legend explaining the
-  encodings it uses; the format is specified in
+  encodings it uses (`legend=False` + `legend(doc)` to send it once for several
+  documents); dates are written as openpyxl reads them (`2025-04-06 00:00:00`);
+  the format is specified in
   [`docs/LLM_ENCODING.md`](https://github.com/AmirShokry/openrsxl/blob/main/docs/LLM_ENCODING.md).
 
 [`examples/llm_compression.py`](https://github.com/AmirShokry/openrsxl/blob/main/examples/llm_compression.py)

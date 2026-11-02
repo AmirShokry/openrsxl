@@ -52,6 +52,9 @@ wb = book.to_workbook()            # an openpyxl Workbook again
 | `skip_hidden_sheets` | leave out hidden and very hidden worksheets (default False) |
 | `print_area_only` | on sheets with a print area, keep only its cells and the print titles (default False) |
 | `rows`, `columns`, `ranges` | keep only these rows / columns / ranges, several segments each (default: all); see [Selecting rows, columns and ranges](#selecting-rows-columns-and-ranges) |
+| `cite_cells` | for a model that must name the cell of each value (default False): `auto` takes the `index` (every value next to its cells) unless it costs more than 1.3 x the grid, never `hybrid`; a grid writes `COL=v` for every field and `ROW:` on every line, without `v*N` runs or `^` - no position is implicit. Still lossless. Live runs showed models misplacing grid fields by a column (`5:\|Name` read as A5) even after explicit jumps, since the fields after a jump are positional |
+| `style_keys` | write only these style keys (not lossless; default: all): `font`, `fill`, `border`, `numFmt`, `alignment`, `protection`, `quotePrefix`, `pivotButton`, `style` (named style), or parts of them - `font.b`, `font.i`, `font.u`, `font.sz`, `font.color`, `font.name` (children of `<font>`), `border.left` ..., `fill.patternType` / `fill.fgColor` / `fill.bgColor`, `alignment.horizontal` ..., `protection.locked` (attributes). Styles and parts equal on them are written once; the legend lists the keys |
+| `resolve_colors` | theme and indexed colours of the style table, with their tint, as `rgb=FFRRGGBB` (from the workbook's theme, Excel's tint formula; not lossless, default False) |
 
 Sections: `values`, `formulas`, `styles`, `merged`, `hyperlinks`,
 `comments`, `dimensions`, `validations`, `conditional_formatting`,
@@ -224,9 +227,10 @@ when the reader only needs what a person sees or prints:
 | `print_area_only=True` | on sheets with a print area, every cell outside it, except the print titles (title rows across the area's columns, title columns across its rows); sheets without a print area are kept whole | `area=A1:F40,H1:J9+titles:1:2,A:A` |
 
 * A left-out cell is dropped from `values`, `formulas`, `styles`,
-  `hyperlinks` and `comments`. Range metadata (merged cells, dimensions,
-  validations, conditional formats, tables, sheet settings) is kept whole,
-  so a reader still sees which rows are hidden and what the print area is.
+  `hyperlinks` and `comments`; `merged` lists only the merged ranges that
+  hold a kept cell. The other range metadata (dimensions, validations,
+  conditional formats, tables, sheet settings) is kept whole, so a reader
+  still sees which rows are hidden and what the print area is.
 * The filter applies before the analysis: the encoding is chosen for the
   cells that remain, `dim=` is their bounding box, and
   `analysis["skipped_cells"]` counts the others.
@@ -283,8 +287,9 @@ compress_workbook("book.xlsx", ranges={"Sales": "A1:F40", "Costs": "B2:D9"})   #
   selection) raises `ValueError` / `TypeError` before anything is read.
 * Like the other filters, the selection applies before the analysis: the
   encoding is chosen for the selected cells, `dim=` is their bounding box,
-  `analysis["skipped_cells"]` counts the others, and range metadata (merged
-  cells, dimensions, validations...) is kept whole.
+  `analysis["skipped_cells"]` counts the others, `merged` lists the merged
+  ranges holding a selected cell, and the other range metadata
+  (dimensions, validations...) is kept whole.
 
 ### Cell references and ranges
 
@@ -305,8 +310,7 @@ comma-separated list of:
 | `-3.5`, `1e-05`, `1.0`, `1e+16` | float (has `.` or an exponent) |
 | `TRUE`, `FALSE` | boolean |
 | `#N/A`, `#DIV/0!`, `#VALUE!` ... (starts with `#`) | error |
-| `2024-01-05` | date (a datetime at midnight, as openpyxl reads a date cell) |
-| `2024-01-05 13:45:00`, `2024-01-05 13:45:00.000500` | datetime |
+| `2024-01-05 00:00:00`, `2024-01-05 13:45:00`, `2024-01-05 13:45:00.000500` | datetime - with its time also at midnight, as openpyxl reads every date cell (a bare `2024-01-05`, written before 0.4.3, still decodes as a midnight datetime) |
 | `13:45:00`, `13:45:00.000500` | time |
 | `"..."` | text, JSON string syntax |
 | `@date:2024-01-05` | a date without time (ISO 8601 cells) |
@@ -596,7 +600,11 @@ and the workbook's shared strings). Formulas, styles or metadata alone
 stay at 93-120 MB.
 
 The legend costs at most about 920 tokens (only the parts a document uses);
-`legend=False` leaves it out when the reader already knows the format.
+`legend=False` leaves it out when the reader already knows the format. To
+give a model the legend once for several documents: `doc.legend_parts` (also
+with `legend=False`) names the parts a document uses, `legend(doc)` returns
+exactly its legend, `legend(set(a.legend_parts) | set(b.legend_parts))` one
+for both.
 
 ## Design notes and research
 

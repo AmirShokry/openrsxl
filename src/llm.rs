@@ -324,12 +324,14 @@ fn push_ymd(out: &mut String, y: i32, m: u32, d: u32) {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// A datetime token: always with its time, also at midnight
+/// (`2025-04-06 00:00:00`: openpyxl reads every date cell as a datetime, and
+/// a reader must see the value as openpyxl gives it). A bare `YYYY-MM-DD`
+/// (written before 0.4.3 for midnight) still decodes as a midnight datetime.
 pub fn push_datetime(out: &mut String, y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32, us: u32) {
     push_ymd(out, y, m, d);
-    if h != 0 || mi != 0 || s != 0 || us != 0 {
-        out.push(' ');
-        push_time(out, h, mi, s, us);
-    }
+    out.push(' ');
+    push_time(out, h, mi, s, us);
 }
 
 fn push_excel_date(out: &mut String, d: ExcelDate) -> Kind {
@@ -1020,7 +1022,8 @@ impl Opts {
             formulas: get_bool("formulas", true)?,
             styles: get_bool("styles", true)?,
             encoding,
-            jump_gap: get_u("jump_gap", 4)?.max(1) as u32,
+            // 0: every field is written COL=v (cite_cells)
+            jump_gap: get_u("jump_gap", 4)? as u32,
             runs: get_bool("runs", true)?,
             row_anchor: get_u("row_anchor", 10)?.clamp(1, u32::MAX as u64) as u32,
             ditto: get_bool("ditto", true)?,
