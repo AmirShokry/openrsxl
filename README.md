@@ -189,7 +189,7 @@ These change how a sheet is accessed rather than what a cell holds, so
 | option | effect |
 |---|---|
 | `exact_dimensions` | `min_row`, `max_row`, `min_column`, `max_column` - and so the rows and columns of `iter_rows()` - from the cells present, as full mode computes them (every cell of the file, also one with a style only, plus the cells the enabled features create), instead of the sheet's `<dimension>` element. Computed by the load-time pre-scan (byte searches, no cell objects). |
-| `random_access` | `ws.cell()` and `ws[...]` (a cell, a range, a column `"B"`, a row `5`) without reading the sheet again on every call. The first random access builds a store of the sheet's cells in one streaming pass; later calls, and `iter_rows`, are served from it with the same cell objects. Ranges, rows and columns hold every position, as full mode; `ws.iter_cols()` / `ws.columns` exist with it. `ws._cells` is a read-only mapping `{(row, column): cell}` of the cells full mode keeps (`.get`, `in`, `items()`, `len`, `bool`). `openrsxl.extended.release_cells(ws)` (or a workbook) frees the store. |
+| `random_access` | `ws.cell()` and `ws[...]` (a cell, a range, a column `"B"`, a row `5`) without reading the sheet again on every call. The first random access builds a store of the sheet's cells in one streaming pass; later calls, and `iter_rows`, are served from it with the same cell objects. Ranges, rows, columns and `iter_rows` hold every position of their bounds, as full mode (read-only mode's `iter_rows` stops at the last row of the file); `ws.iter_cols()` / `ws.columns` exist with it. `ws._cells` is a read-only mapping `{(row, column): cell}` of the cells full mode keeps (`.get`, `in`, `items()`, `len`, `bool`). `openrsxl.extended.release_cells(ws)` (or a workbook) frees the store. |
 | `reopen` | a workbook closed with `close()` reopens its file (the path, or the file object it was loaded from) when it is used again, as a full-mode workbook stays usable after `close()`. Its shared strings are kept. A pass started before `close()` goes on in any case. |
 
 `skip_invalid_defined_names=True` (any mode) skips a print titles defined
@@ -437,7 +437,8 @@ What differs, in full in [`docs/COMPATIBILITY.md`](https://github.com/AmirShokry
   mixed, and `isinstance` checks against openpyxl's classes are false - eg.
   for the `ArrayFormula` / `DataTableFormula` values of formula cells -
   unless `openrsxl.extended.install_as_openpyxl()` makes openpyxl's names
-  point to openrsxl (above). Code that must accept both libraries' objects
+  point to openrsxl (above; the classes then also report openpyxl's module
+  names, eg. in default reprs). Code that must accept both libraries' objects
   can test the attributes they share (`value.t == "array"`, `value.ref`,
   `value.text`). Warnings carry the same category and message but other
   `filename`/`lineno`; tracebacks differ.

@@ -33,7 +33,11 @@ types or files produced.
    (data tables). As in openpyxl, these two classes define neither `__eq__`
    (two loads give unequal objects) nor `__repr__` (the default repr shows
    the object's address): serialise them by their attributes, eg.
-   `value.text`.
+   `value.text`. After `install_as_openpyxl()` the classes also carry
+   openpyxl's module names (`Font.__module__ == "openpyxl.styles.fonts"`,
+   default reprs `<openpyxl.worksheet.formula.ArrayFormula object at ...>`,
+   pickles referring to `openpyxl.*`); the classes of
+   `openrsxl.extended` keep their own.
 2. **Warning locations.** Warnings carry the same category and message, but
    their `filename`/`lineno` point into openrsxl's modules. Warnings raised
    while reading worksheets (unsupported extensions, out-of-range dates, ...)
@@ -182,9 +186,10 @@ choices:
   of the cells `iter_rows` yields (memory: the cell objects, as full mode
   keeps them); later random accesses and `iter_rows` are lookups returning
   the same objects (`ws.cell(1, 1) is ws["A1"]`). `ws[range]`, `ws[5]` and
-  `ws["B"]` hold every position of the range, as in full mode, while
-  `iter_rows` keeps read-only mode's rows (no rows after the last row of the
-  file), with or without the store; a sheet without `<dimension>` takes the
+  `ws["B"]` hold every position of the range, as in full mode, and so does
+  `iter_rows`: every row of its bounds, also after the last row of the file
+  (read-only mode, and the streaming sheets without `random_access`, stop
+  there), with or without the store; a sheet without `<dimension>` takes the
   bounds of its cells for `ws["B"]` / `iter_cols`. `ws._cells` is a
   read-only `Mapping` (not a `dict`) of the cells full mode keeps, in row
   order (full mode: file cells first, then those created by merged ranges,

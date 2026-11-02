@@ -1041,6 +1041,11 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
             rows = self._ext_base_rows(min_col, min_row, max_col, max_row, values_only)
             if self._overlay or self._merge is not None:
                 rows = self._apply_overlays(rows, min_col, min_row, max_col, max_row, values_only)
+        if self._ext.random_access and max_col and max_row:
+            # full mode's iter_rows: every row of the bounds, also after the
+            # last row of the file (read-only mode stops there)
+            filler = None if values_only else self._ext_empty()
+            rows = _pad_rows(rows, min_row, max_row, (filler,) * max(0, max_col + 1 - min_col))
         if self._ext.create_empty_cells and not values_only:
             rows = self._create_empty(rows, min_row, min_col)
         return rows
@@ -1216,7 +1221,6 @@ class ReadOnlyWorksheet(_ReadOnlyWorksheet):
         if not self._ext.random_access:
             return Worksheet.__getitem__(self, key)
         # Worksheet.__getitem__: every position of the range, as full mode
-        # (iter_rows keeps read-only mode's rows, store or not)
         if isinstance(key, slice):
             if not all([key.start, key.stop]):
                 raise IndexError(f"{key} is not a valid coordinate or range")
@@ -1635,6 +1639,15 @@ def _quiet(gen):
             except StopIteration:
                 return
         yield item
+
+
+def _pad_rows(rows, min_row, max_row, pad):
+    idx = min_row - 1
+    for row in rows:
+        idx += 1
+        yield row
+    for _ in range(idx + 1, max_row + 1):
+        yield pad
 
 
 def _chain_rows(base, last, min_row, pad):

@@ -370,13 +370,14 @@ def compare_extended(src, data_only=False, flags=None, rsxl=None, oracle=None, l
 
 
 def _rows_sig(ws, flags):
+    # one hash per row (the rows of big sheets are not kept)
     out = []
     for values_only in (False, True):
         for row in ws.iter_rows(values_only=values_only):
             if values_only:
-                out.append(tuple(norm(v) for v in row))
+                out.append(hash(repr(tuple(norm(v) for v in row))))
             else:
-                out.append(tuple(_sig(c, flags) for c in row))
+                out.append(hash(tuple(_sig(c, flags) for c in row)))
     return out
 
 
@@ -413,22 +414,30 @@ def _check_random_access(name, ews, pws, pcells, fcells, vcells, flags, diff):
             return f"at {(c.row, c.column)}"
         return str(actual_cell(c, flags))
 
-    # ws._cells: the cells full mode keeps (at valid positions)
-    exp_keys = sorted(k for k in pcells if k[0] >= 1 and k[1] >= 1)
-    got_keys = sorted(ews._cells)
-    if got_keys != exp_keys:
-        if diff(f"{name}: _cells keys {got_keys[:10]} != {exp_keys[:10]} ({len(got_keys)} / {len(exp_keys)})"):
+    # ws._cells: the cells full mode keeps (at valid positions); compared
+    # without copying the keys (big sheets)
+    view = ews._cells
+    n_exp = sum(1 for k in pcells if k[0] >= 1 and k[1] >= 1)
+    missing = [k for k in pcells if k[0] >= 1 and k[1] >= 1 and k not in view][:10]
+    extra = [k for k in view if k not in pcells][:10]
+    if missing or extra or len(view) != n_exp or bool(view) != bool(n_exp):
+        if diff(f"{name}: _cells keys: missing {missing}, extra {extra} ({len(view)} / {n_exp})"):
             return True
-    if len(ews._cells) != len(got_keys) or bool(ews._cells) != bool(got_keys):
-        if diff(f"{name}: _cells len / bool"):
+    order = [k for _, k in zip(range(200000), view)]
+    if order != sorted(order):
+        if diff(f"{name}: _cells not in row order"):
             return True
-    for k in exp_keys:
-        if k in ews._cells and got(ews._cells.get(k), k) != expected(k):
+    max_r = max_c = 1
+    for k in pcells:
+        if k[0] < 1 or k[1] < 1:
+            continue
+        max_r, max_c = max(max_r, k[0]), max(max_c, k[1])
+        if k in view and got(view.get(k), k) != expected(k):
             if diff(f"{name}: _cells[{k}]\n  exp {expected(k)}\n  got {got(ews._cells[k], k)}"):
                 return True
     # every position of the sheet and beyond
-    max_r = min(max([k[0] for k in exp_keys] + [ews.max_row or 1]) + 2, 80)
-    max_c = min(max([k[1] for k in exp_keys] + [ews.max_column or 1]) + 2, 40)
+    max_r = min(max(max_r, ews.max_row or 1) + 2, 80)
+    max_c = min(max(max_c, ews.max_column or 1) + 2, 40)
     for r in range(1, max_r + 1):
         for c in range(1, max_c + 1):
             a, e = got(ews.cell(r, c), (r, c)), expected((r, c))
@@ -449,8 +458,8 @@ def _check_random_access(name, ews, pws, pcells, fcells, vcells, flags, diff):
     if ews["A1"] is not ews.cell(1, 1) and (1, 1) in pcells:
         diff(f"{name}: ws['A1'] is not ws.cell(1, 1)")
     # (unsized sheet: the bounds of the cells, as full mode)
-    nrows = ews.max_row or max([k[0] for k in exp_keys], default=1)
-    ncols = ews.max_column or max([k[1] for k in exp_keys], default=1)
+    nrows = ews.max_row or max([k[0] for k in pcells if k[0] >= 1 and k[1] >= 1], default=1)
+    ncols = ews.max_column or max([k[1] for k in pcells if k[0] >= 1 and k[1] >= 1], default=1)
     col = ews["B"]
     if [got(c, (r, 2)) for r, c in enumerate(col, 1)] != [expected((r, 2)) for r in range(1, nrows + 1)]:
         diff(f"{name}: ws['B']")
@@ -460,7 +469,7 @@ def _check_random_access(name, ews, pws, pcells, fcells, vcells, flags, diff):
     after = _rows_sig(ews, flags)
     if after != before:
         n = next((i for i, (x, y) in enumerate(zip(after, before)) if x != y), min(len(after), len(before)))
-        diff(f"{name}: iter_rows changed by the store at row {n}: {after[n:n + 1]} != {before[n:n + 1]}")
+        diff(f"{name}: iter_rows changed by the store (pass row {n} of {len(before)} / {len(after)})")
     return False
 
 

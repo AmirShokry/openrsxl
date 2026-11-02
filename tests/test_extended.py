@@ -1094,3 +1094,22 @@ def test_skip_invalid_defined_names(read_only):
     assert ref._print_rows is not None
     assert str(ws._print_area) == str(ref._print_area) and list(ws.defined_names) == list(ref.defined_names)
     assert next(ws.iter_rows(values_only=True))[:2] == ("zero", 1)
+
+
+def test_random_access_iter_rows_every_row_of_the_bounds():
+    """random_access: iter_rows gives every row of its bounds, as full mode,
+    also after the last row of the file (read-only mode stops there)"""
+    data = raw('<row r="1"><c r="A1"><v>1</v></c></row><row r="3"><c r="B3"><v>3</v></c></row>', rels=False)
+    full = openpyxl.load_workbook(io.BytesIO(data)).active
+    exp = [tuple(c.value for c in r) for r in full.iter_rows(min_row=1, max_row=6, min_col=1, max_col=2)]
+    plain = ext.load_workbook(io.BytesIO(data), read_only=True, create_empty_cells=True).active
+    assert len(list(plain.iter_rows(min_row=1, max_row=6, min_col=1, max_col=2))) == 3  # read-only mode
+    for store in (False, True):
+        ws = ext.load_workbook(io.BytesIO(data), read_only=True, random_access=True, create_empty_cells=True).active
+        if store:
+            ws.cell(1, 1)
+        rows = list(ws.iter_rows(min_row=1, max_row=6, min_col=1, max_col=2))
+        assert [tuple(c.value for c in r) for r in rows] == exp and len(rows) == 6
+        assert [c.coordinate for c in rows[5]] == ["A6", "B6"]
+        assert list(ws.iter_rows(min_row=5, max_row=6, max_col=2, values_only=True)) == [(None, None)] * 2
+        assert len(ws["A1:B6"]) == 6

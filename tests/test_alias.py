@@ -121,3 +121,36 @@ def test_pandas_engine_openpyxl_uses_openrsxl():
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "ok"
+
+
+def test_reprs_name_openpyxl_modules():
+    # after install_as_openpyxl() the classes report openpyxl's module names
+    # (object repr, Serialisable's repr, pickle) - modules imported before and
+    # after the call; without it openrsxl's
+    proc = run("""
+        import io, pickle
+        import openrsxl
+        from openrsxl.worksheet.formula import ArrayFormula  # imported before
+        before = repr(ArrayFormula("A1", "=1"))
+        import openrsxl.extended as ext
+        ext.install_as_openpyxl()
+        import openpyxl
+        from openpyxl.chart.bar_chart import BarChart  # imported after
+        f = ArrayFormula("A1", "=1")
+        assert before.startswith("<openrsxl.worksheet.formula.ArrayFormula object at "), before
+        assert repr(f).startswith("<openpyxl.worksheet.formula.ArrayFormula object at "), repr(f)
+        assert ArrayFormula.__module__ == "openpyxl.worksheet.formula"
+        assert BarChart.__module__ == "openpyxl.chart.bar_chart"
+        assert repr(openpyxl.styles.Font()).startswith("<openpyxl.styles.fonts.Font object>")
+        assert pickle.loads(pickle.dumps(openpyxl.styles.Font(b=True))).b is True
+        assert type(pickle.loads(pickle.dumps(f))) is ArrayFormula
+        wb = openpyxl.Workbook()
+        wb.active["A1"] = f
+        buf = io.BytesIO()
+        wb.save(buf)
+        assert repr(openpyxl.load_workbook(buf).active["A1"].value).startswith("<openpyxl.worksheet.formula.")
+        assert ext.load_workbook.__module__ == "openrsxl.extended._load"  # extended: its own
+        print("ok")
+        """)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "ok"

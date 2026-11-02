@@ -112,7 +112,9 @@ def load_workbook(
         columns, rows) without reading the sheet again on every call: the
         first one builds a store of the sheet's cells (one streaming pass),
         later calls - and ``iter_rows`` - are served from it; the same cell
-        objects as ``iter_rows``. ``ws._cells`` is a read-only mapping
+        objects as ``iter_rows``. Ranges, rows, columns and ``iter_rows``
+        hold every position of their bounds, as full mode (also after the
+        last row of the file, where read-only mode stops). ``ws._cells`` is a read-only mapping
         {(row, column): cell} of the cells full mode keeps.
         ``openrsxl.extended.release_cells(ws)`` frees the store
     :param reopen: a workbook closed with ``close()`` reopens its file (the

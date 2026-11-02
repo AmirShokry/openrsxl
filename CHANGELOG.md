@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.2
+
+* `random_access=True`: `iter_rows` with explicit bounds gives every row of
+  them, as full mode, also after the last row of the file (read-only mode,
+  and 0.4.1, stopped there: `iter_rows(max_row=6)` on a 3-row sheet gave 3
+  rows); `ws["A1:B6"]` already did. Without `random_access` iteration stays
+  read-only mode's.
+* `install_as_openpyxl()`: the classes now also carry openpyxl's module
+  names (`ArrayFormula.__module__ == "openpyxl.worksheet.formula"`, default
+  reprs `<openpyxl.worksheet.formula.ArrayFormula object at ...>`,
+  Serialisable reprs, pickles), for modules imported before and after the
+  call; `openrsxl.extended`'s own classes keep theirs. Without the call
+  nothing changes.
+* Test oracle (`ext_access`): big sheets are compared without keeping a
+  copy of every row / key (the check needed more than 3 GB on 1-2M-cell
+  files; openrsxl itself: 40-280 MB).
+
 ## 0.4.1
 
 * Fixed (extended): the warnings of a streaming sheet's data were still

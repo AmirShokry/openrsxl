@@ -174,6 +174,70 @@ def install_as_openpyxl():
                 )
     if not any(isinstance(f, _OpenpyxlFinder) for f in sys.meta_path):
         sys.meta_path.insert(0, _OpenpyxlFinder())
+    # the classes carry openpyxl's module names (repr, Serialisable's repr,
+    # pickle), as the modules they are imported from: those loaded now and
+    # those loaded later
+    if not any(isinstance(f, _RelabelFinder) for f in sys.meta_path):
+        for name, module in list(sys.modules.items()):
+            if module is not None and _relabelled(name):
+                _relabel(module)
+        sys.meta_path.insert(0, _RelabelFinder())
+
+
+def _relabelled(name):
+    """openrsxl modules that are openpyxl's (not extended / native ones)"""
+    return (name == "openrsxl" or name.startswith("openrsxl.")) and not (
+        name.startswith("openrsxl.extended") or name.startswith("openrsxl._")
+    )
+
+
+def _relabel(module):
+    name = module.__name__
+    new = "openpyxl" + name[len("openrsxl") :]
+    for value in list(vars(module).values()):
+        if isinstance(value, type) and value.__module__ == name:
+            try:
+                value.__module__ = new
+            except (TypeError, AttributeError):  # pragma: no cover - native types
+                pass
+
+
+class _RelabelLoader(importlib.abc.Loader):
+    """The loader of an openrsxl module, relabelling its classes once executed"""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def create_module(self, spec):
+        return self._inner.create_module(spec)
+
+    def exec_module(self, module):
+        self._inner.exec_module(module)
+        _relabel(module)
+
+    def __getattr__(self, name):
+        # get_data, get_resource_reader, is_package, ...
+        return getattr(self._inner, name)
+
+
+class _RelabelFinder(importlib.abc.MetaPathFinder):
+    """install_as_openpyxl(): openrsxl modules imported afterwards"""
+
+    def find_spec(self, fullname, path=None, target=None):
+        if not _relabelled(fullname):
+            return None
+        for finder in sys.meta_path:
+            if finder is self or isinstance(finder, (_OpenpyxlFinder, _AliasFinder)):
+                continue
+            find = getattr(finder, "find_spec", None)
+            if find is None:
+                continue
+            spec = find(fullname, path, target)
+            if spec is not None:
+                if spec.loader is not None and hasattr(spec.loader, "exec_module"):
+                    spec.loader = _RelabelLoader(spec.loader)
+                return spec
+        return None
 
 
 def __getattr__(name):
